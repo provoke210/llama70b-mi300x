@@ -1,15 +1,37 @@
 # llama70b-mi300x
 
-Llama-3.3-70B FP8 decode on a single AMD Instinct MI300X, with hand-written
-Triton kernels, measured against the hardware roofline and vLLM-ROCm.
+Llama-3.3-70B FP8 decode on a single AMD Instinct MI300X, with a from-scratch
+engine and hand-written Triton kernels, measured against the hardware roofline
+and against vLLM-ROCm on the same workload.
+
+## Results at a glance
+
+Decode ms/step on 1x MI300X (lower is better), same prompt, greedy, all three
+run back to back. Details and method: [Results](#results-1x-mi300x-vf-rocm-102-pytorch-215-triton-39).
+
+| batch | this repo | vLLM 0.32 default | vLLM 0.32 + AITER |
+|---|---|---|---|
+| 1 | **26.2 ms** (38 tok/s) | 28.8 ms | 27.3 ms |
+| 8 | **27.4 ms** (292 tok/s) | 29.5 ms | 28.0 ms |
+| 32 | 30.5 ms (1048 tok/s) | 31.5 ms | **30.1 ms** |
+
+- Batch-1 decode went from 25 to 38 tok/s over the project; it now streams the
+  weights at ~77% of the *measured* HBM bandwidth (3.6 TB/s, not the 5.3 TB/s
+  spec).
+- The tuned split-K FP8 GEMMs take 18% less time per layer than hipBLASLt on
+  the same shapes.
+- Along the way: three FP8 numerical pitfalls on ROCm / Triton, written up in
+  [Findings worth knowing](#findings-worth-knowing).
 
 ## Why this is interesting
 
-- **Decode is memory-bound.** Every step reads all ~70 GB of FP8 weights. At the
-  MI300X's 5.3 TB/s that is a floor of ~13 ms per step (~75 tok/s at batch 1).
-  How close each kernel gets to that bandwidth is the headline metric.
+- **Decode is memory-bound.** Every step reads all ~73 GB of FP8 weights. The
+  MI300X spec says 5.3 TB/s (a ~13 ms floor), but a streaming read on this
+  instance reaches 3.6 TB/s, so the realistic batch-1 floor is ~20 ms per
+  step. How close the engine gets to that is the headline metric.
 - **192 GB on one GPU.** FP8 weights take ~70 GB, leaving ~110 GB of KV cache
-  (~0.31 MB/token in BF16, so ~350k tokens) -- no tensor parallelism needed.
+  (~0.31 MB/token in BF16, ~350k tokens). Tensor parallelism is therefore not
+  needed to fit the model; it is here to cut per-step latency.
 - **FP8 is a different format on MI300X.** Checkpoints use OCP `e4m3fn` (max 448);
   gfx942 computes in `e4m3fnuz` (max 240, exponent bias 8, no negative zero).
   `mi300_llm/fp8.py` converts by reinterpreting bits and doubling the scale,
@@ -19,13 +41,21 @@ Triton kernels, measured against the hardware roofline and vLLM-ROCm.
 
 | Path | What |
 |---|---|
-| `mi300_llm/ref_ops.py` | Pure-PyTorch reference for every op |
-| `mi300_llm/kernels/` | Triton kernels: RMSNorm+residual, RoPE, SiLU-mul, per-token FP8 quant, FP8 GEMM, split-K paged decode attention |
+| `mi300_llm/ref_ops.py` | Pure-PyTorch reference for every op; each Triton kernel is tested against it |
+| `mi300_llm/kernels/fp8_gemm.py` | W8A8 FP8 GEMM with deterministic split-K; per-shape configs in `gemm_configs.json` |
+| `mi300_llm/kernels/decode_attention.py` | Split-K (flash-decoding) paged attention, GQA-aware |
+| `mi300_llm/kernels/fused_quant.py` | Per-token FP8 quantization, column-parallel, fused with RMSNorm and SiLU-mul |
+| `mi300_llm/kernels/norm_rope.py` | RMSNorm (+ residual add), RoPE, SiLU-mul |
 | `mi300_llm/ops.py` | Switches each op between `ref` and `triton` |
 | `mi300_llm/model.py` | Llama forward over a paged KV cache (fused QKV, fused gate/up) |
-| `mi300_llm/loader.py` | Loads BF16 or compressed-tensors FP8 safetensors |
-| `mi300_llm/engine.py` | Batched greedy generation (continuous batching: phase 2) |
-| `scripts/` | Droplet setup, generation + speed, kernel roofline benchmark |
+| `mi300_llm/loader.py` | Loads BF16 or compressed-tensors FP8 safetensors, optionally sharded for TP |
+| `mi300_llm/tp.py` | Tensor-parallel layout and communication |
+| `mi300_llm/engine.py` | Batched greedy generation, HIP-graph decode |
+| `tests/` | Reference vs Hugging Face, kernels vs reference, TP on CPU (gloo) |
+| `scripts/` | Droplet setup, generation + timing, benchmarks, GEMM tuning, vLLM comparison |
+| `scripts/investigations/` | One-off scripts behind the numerical findings |
+| `results/` | Raw logs and CSVs; [results/README.md](results/README.md) indexes them |
+| `notebooks/roofline.ipynb` | Plots: kernel bandwidth, attention scaling, end-to-end vs vLLM |
 
 ## Status
 
@@ -33,12 +63,27 @@ Triton kernels, measured against the hardware roofline and vLLM-ROCm.
 |---|---|
 | 1. Reference path matches Hugging Face (fp32, GQA, llama3 RoPE, multi-block paged KV) | Done |
 | 1. FP8 loader (compressed-tensors, fnuz conversion, QKV fusion) | Done |
-| 2. Triton kernels on MI300X: 39 tests pass, 70B generates coherent text | Done |
+| 2. Triton kernels on MI300X, 70B generates coherent text | Done |
 | 3. Split-K GEMM + per-shape tuning, attention split heuristic, HIP graph decode | Done |
 | 4. Compare with vLLM-ROCm on the same workload | Done |
 | 5. Column-parallel quantization; RMSNorm + quant and SiLU-mul + quant fusion | Done |
 | 6. Tensor parallelism: sharded loading, all-reduce, vocab-parallel head; verified on CPU (gloo, TP=2/4) | Done; **not yet run on GPUs** |
 | Next: TP scaling on 8x MI300X vs vLLM (`scripts/compare_tp.sh`); task-accuracy check (e.g. GSM8K); faster decode attention | |
+
+Tests: 53 passed on the MI300X at the last GPU run (before TP was added); 11
+run on CPU, including the TP tests.
+
+## Limitations
+
+- **Accuracy is not task-evaluated yet.** Kernels match the reference and the
+  output reads coherently, but there is no GSM8K-style score. Greedy tokens
+  match vLLM for 15 tokens and then diverge, as vLLM's own two backends do.
+- **Decode-focused engine.** No continuous batching (requests can't join
+  mid-decode); prefill uses the reference attention, not a tuned kernel.
+- **One virtualized GPU.** All numbers are from a single MI300X VF (SR-IOV) on
+  AMD Developer Cloud; bare-metal bandwidth may differ.
+- **Tensor parallelism is verified for correctness only**, on CPU. Its GPU
+  path (RCCL, all-reduce inside a HIP graph) has not run yet.
 
 ## Tensor parallelism
 
@@ -120,10 +165,10 @@ than in real decode, where 70 GB of weights stream through.
 
 ### Optimization steps
 
-| batch | first working version | + split-K, tuned tiles, HIP graph |
-|---|---|---|
-| 1 | ~38 ms/step | 27.8 ms/step |
-| 32 | ~62 ms/step | 32.0 ms/step |
+| batch | first working version | + split-K, tuned tiles, HIP graph | + parallel, fused quantization |
+|---|---|---|---|
+| 1 | ~38 ms/step | 27.8 ms/step | **26.2 ms/step** |
+| 32 | ~62 ms/step | 32.0 ms/step | **30.5 ms/step** |
 
 (The first column was measured with an older, less careful method; treat it as
 approximate.)
@@ -192,8 +237,9 @@ python scripts/bench_kernels.py --csv results/kernels.csv
 
 Billing runs while a droplet exists, even powered off: destroy it after each session.
 
-## Locally (CPU)
+## Locally (CPU, e.g. macOS)
 
 ```bash
-python -m pytest tests -q   # reference + loader tests; kernel tests skip
+uv venv --python 3.12 && uv pip install torch numpy pytest safetensors transformers
+.venv/bin/python -m pytest tests -q   # reference, loader and TP tests; GPU kernel tests skip
 ```
