@@ -53,16 +53,19 @@ def main():
         graph = float("nan")
         if cuda:
             # Capture 20 back-to-back all-reduces, as consecutive layers would.
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                dist.all_reduce(x)
-            torch.cuda.current_stream().wait_stream(s)
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-                for _ in range(20):
+            try:
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
                     dist.all_reduce(x)
-            graph = time_us(g.replay, 50, cuda) / 20
+                torch.cuda.current_stream().wait_stream(s)
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    for _ in range(20):
+                        dist.all_reduce(x)
+                graph = time_us(g.replay, 50, cuda) / 20
+            except Exception as e:  # noqa: BLE001  (capture support depends on the RCCL build)
+                say(f"  graph capture of all_reduce failed: {type(e).__name__}: {str(e)[:160]}")
         best = graph if cuda else eager
         say(f"{m:>6}{m * H * x.element_size():>10}{eager:>10.1f}{graph:>10.1f}{best * CALLS_PER_STEP / 1e3:>9.2f}")
     dist.destroy_process_group()

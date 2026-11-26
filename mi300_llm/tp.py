@@ -48,11 +48,20 @@ class TPGroup:
         return x
 
     def all_gather_last_dim(self, x: torch.Tensor) -> torch.Tensor:
+        """Concatenate every rank's ``x`` along the last dimension.
+
+        Uses the single-buffer ``all_gather_into_tensor`` (one collective into
+        one allocation), which is friendlier to graph capture than the
+        list-of-tensors form.
+        """
         if not self.enabled:
             return x
-        parts = [torch.empty_like(x) for _ in range(self.world)]
-        dist.all_gather(parts, x.contiguous())
-        return torch.cat(parts, dim=-1)
+        x = x.contiguous()
+        # Ranks stacked along dim 0 (the layout every backend accepts, gloo included).
+        out = torch.empty((self.world * x.shape[0], *x.shape[1:]), dtype=x.dtype, device=x.device)
+        dist.all_gather_into_tensor(out, x)
+        # [W * M, n] -> [M, W * n], rank-major along the last dim.
+        return out.view(self.world, *x.shape).movedim(0, -2).reshape(*x.shape[:-1], self.world * x.shape[-1])
 
 
 SINGLE = TPGroup(0, 1)
