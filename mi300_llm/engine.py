@@ -109,15 +109,27 @@ def generate(
     return_logits: bool = False,
     use_graph: bool = False,
     graphs: dict | None = None,
+    stop_ids: set[int] | None = None,
+    graph_width: int | None = None,
 ):
     """Greedy decoding. Returns new token ids per prompt (and per-step logits).
 
     ``graphs`` caches GraphDecoders across calls, keyed by (batch, width).
+    ``stop_ids``: stop once every sequence has produced one of these tokens;
+    each output is cut after its first stop token. Finished sequences keep
+    decoding (discarded) until the last one stops: the batch is static.
+    ``graph_width``: fixed block-table width for the graph, so batches with
+    different prompt lengths reuse one captured graph instead of capturing
+    a new one each time.
     """
     seqs = [Sequence(i, p) for i, p in enumerate(prompts)]
     graph = None
     if use_graph:
         width = (max(len(p) for p in prompts) + max_new_tokens + cache.block_size - 1) // cache.block_size
+        if graph_width is not None:
+            if graph_width < width:
+                raise ValueError(f"graph_width={graph_width} < needed {width}")
+            width = graph_width
         for s in seqs:  # reserve every block up front: the graph's table width is fixed
             s.ensure_blocks(cache, len(s) + max_new_tokens)
         graphs = graphs if graphs is not None else {}
@@ -128,15 +140,22 @@ def generate(
             graphs[key] = GraphDecoder(model, cache, len(seqs), width)
         graph = graphs[key]
     step_logits = []
+    done = [False] * len(seqs)
     logits = _prefill(model, cache, seqs)
     for step in range(max_new_tokens):
         step_logits.append(logits.clone() if graph is not None else logits)
         nxt = logits.argmax(-1).tolist()
-        for s, t in zip(seqs, nxt):
+        for i, (s, t) in enumerate(zip(seqs, nxt)):
             s.tokens.append(t)
+            if stop_ids and t in stop_ids:
+                done[i] = True
+        if stop_ids and all(done):
+            break
         if step + 1 < max_new_tokens:
             logits = _decode(model, cache, seqs, graph)
     for s in seqs:
         cache.free(s.blocks)
     new = [s.tokens[s.num_prompt :] for s in seqs]
+    if stop_ids:
+        new = [t[: next((j + 1 for j, x in enumerate(t) if x in stop_ids), len(t))] for t in new]
     return (new, step_logits) if return_logits else new

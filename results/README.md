@@ -1,12 +1,14 @@
 # Results
 
 All measured on one AMD Instinct MI300X VF (AMD Developer Cloud, ROCm 10.2,
-PyTorch 2.15, Triton 3.9), 2026-11-25, with Llama-3.3-70B-Instruct-FP8-dynamic.
+PyTorch 2.15, Triton 3.9), 2026-11-25 and 26, with Llama-3.3-70B-Instruct-FP8-dynamic.
 
 | File | What | Made by |
 |---|---|---|
 | `compare_vllm_fused.log` | **Final** end-to-end decode: this repo vs vLLM default vs vLLM+AITER, back to back | `scripts/compare_vllm.sh` |
 | `compare_vllm.log` | Same comparison before the quantization work (its first "ours" block used a 128-token window by mistake; see the note at the end) | `scripts/compare_vllm.sh` |
+| `gsm8k_ours.jsonl`, `gsm8k_vllm.jsonl`, `gsm8k_vllm_aiter.jsonl` | GSM8K test set, per-question prompt outputs, predictions and correctness for each engine (first line: run metadata) | `scripts/eval_gsm8k.py` via `scripts/run_gsm8k.sh` |
+| `gsm8k.log` | Log of that run: setup, 58 GPU tests, scores and the paired comparison | `scripts/run_gsm8k.sh` |
 | `layer_breakdown.txt` | GPU time of every kernel in one decoder layer, separate vs fused quantization | `scripts/bench_layer.py` |
 | `bandwidth.txt` | Achievable HBM bandwidth (3.6 TB/s, vs 5.3 spec) | `scripts/bench_bandwidth.py` |
 | `kernels_baseline.csv` | Per-kernel bandwidth of the first working version, Triton vs hipBLASLt | `scripts/bench_kernels.py` |

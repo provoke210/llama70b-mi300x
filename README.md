@@ -20,6 +20,10 @@ run back to back. Details and method: [Results](#results-1x-mi300x-vf-rocm-102-p
   spec).
 - The tuned split-K FP8 GEMMs take 18% less time per layer than hipBLASLt on
   the same shapes.
+- Same accuracy as vLLM: GSM8K (all 1319 test questions, greedy, identical
+  prompts) scores 95.45% vs 95.75% for vLLM and 95.68% for vLLM + AITER; the
+  differences are not significant (paired McNemar p = 0.58 / 0.69). See
+  [Accuracy](#accuracy-gsm8k).
 - Along the way: three FP8 numerical pitfalls on ROCm / Triton, written up in
   [Findings worth knowing](#findings-worth-knowing).
 
@@ -68,18 +72,20 @@ run back to back. Details and method: [Results](#results-1x-mi300x-vf-rocm-102-p
 | 4. Compare with vLLM-ROCm on the same workload | Done |
 | 5. Column-parallel quantization; RMSNorm + quant and SiLU-mul + quant fusion | Done |
 | 6. Tensor parallelism: sharded loading, all-reduce, vocab-parallel head; verified on CPU (gloo, TP=2/4) | Done; **not yet run on GPUs** |
-| Next: TP scaling on 8x MI300X vs vLLM (`scripts/compare_tp.sh`); task-accuracy check (e.g. GSM8K); faster decode attention | |
+| 7. GSM8K accuracy vs vLLM on identical prompts | Done: on par |
+| Next: TP scaling on 8x MI300X vs vLLM (`scripts/compare_tp.sh`); faster decode attention; continuous batching | |
 
-Tests: 53 passed on the MI300X at the last GPU run (before TP was added); 11
-run on CPU, including the TP tests.
+Tests: 58 pass on the MI300X (kernels, model, early stopping, and the CPU TP
+tests); 12 run on a CPU-only machine.
 
 ## Limitations
 
-- **Accuracy is not task-evaluated yet.** Kernels match the reference and the
-  output reads coherently, but there is no GSM8K-style score. Greedy tokens
-  match vLLM for 15 tokens and then diverge, as vLLM's own two backends do.
+- **Accuracy is checked on one benchmark.** GSM8K matches vLLM; other tasks
+  (long context, code) are not evaluated.
 - **Decode-focused engine.** No continuous batching (requests can't join
-  mid-decode); prefill uses the reference attention, not a tuned kernel.
+  mid-decode), so a batch runs until its longest answer ends: GSM8K took
+  618 s here vs ~300 s in vLLM at the same per-step speed. Prefill uses the
+  reference attention, not a tuned kernel.
 - **One virtualized GPU.** All numbers are from a single MI300X VF (SR-IOV) on
   AMD Developer Cloud; bare-metal bandwidth may differ.
 - **Tensor parallelism is verified for correctness only**, on CPU. Its GPU
@@ -150,6 +156,26 @@ Greedy outputs agree for the first 15 tokens with both vLLM runs; the two vLLM
 backends agree with each other for 42. Different FP8 accumulation orders flip
 near-ties, then the sequences diverge; all outputs read coherently. Token
 agreement is not an accuracy metric; a task benchmark is the next check.
+
+### Accuracy (GSM8K)
+
+All 1319 GSM8K test questions, zero-shot chain of thought, greedy, up to 512
+new tokens, stopping at the model's EOS tokens. All three engines receive the
+same prompt token ids; the answer is the number after the last `####`.
+`scripts/eval_gsm8k.py`, run by `scripts/run_gsm8k.sh`; per-question outputs in
+`results/gsm8k_*.jsonl`.
+
+| engine | correct | accuracy | 95% CI (Wilson) |
+|---|---|---|---|
+| this repo | 1259 / 1319 | 95.45% | 94.19 - 96.45% |
+| vLLM 0.32 default | 1263 / 1319 | 95.75% | 94.53 - 96.72% |
+| vLLM 0.32 + AITER | 1262 / 1319 | 95.68% | 94.44 - 96.65% |
+
+Paired by question: this repo and vLLM disagree on 30 questions (13 only this
+repo gets right, 17 only vLLM; exact McNemar p = 0.58). vLLM's own two
+backends disagree on 23 (12 vs 11, p = 1.00). So FP8 kernel differences flip a
+handful of answers in both directions, no more than switching vLLM's backend
+does. Mean response length is the same within 1 token (~205).
 
 ### Where a layer's time goes (`scripts/bench_layer.py`, batch 1)
 

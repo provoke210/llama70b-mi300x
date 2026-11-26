@@ -1,0 +1,24 @@
+== 05:49 setup
+[90mHint: The `hf-cli` skill is not installed. Run `hf skills add -g` to teach your AI agents how to use the `hf` CLI.[0m
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+/shared-docker/models/Llama-3.3-70B-Instruct-FP8-dynamic
+== 05:50 tests
+..........................................................               [100%]
+58 passed in 33.80s
+== 05:51 ours
+  1280/1319 questions, 597s
+  1312/1319 questions, 609s
+  1319/1319 questions, 618s
+ours: 1259/1319 = 95.45%  (618s) -> results/gsm8k_ours.jsonl
+== 06:02 vLLM default
+vllm: 1263/1319 = 95.75%  (300s) -> results/gsm8k_vllm.jsonl
+== 06:10 vLLM + AITER
+vllm+aiter: 1262/1319 = 95.68%  (291s) -> results/gsm8k_vllm_aiter.jsonl
+== 06:17 report
+ours          1259/1319 = 95.45%  95% CI [94.19%, 96.45%]  no '####': 14  hit max tokens: 10  (618s)
+vllm          1263/1319 = 95.75%  95% CI [94.53%, 96.72%]  no '####': 16  hit max tokens: 9  (300s)
+vllm+aiter    1262/1319 = 95.68%  95% CI [94.44%, 96.65%]  no '####': 25  hit max tokens: 9  (291s)
+ours vs vllm: both correct 1246, only ours 13, only vllm 17; same answer 1277/1319, identical response 290/1319
+ours vs vllm+aiter: both correct 1248, only ours 11, only vllm+aiter 14; same answer 1271/1319, identical response 144/1319
+vllm vs vllm+aiter: both correct 1251, only vllm 12, only vllm+aiter 11; same answer 1275/1319, identical response 107/1319
+DONE

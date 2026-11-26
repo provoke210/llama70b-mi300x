@@ -44,6 +44,18 @@ def test_greedy_logits_match_hf(hf_tiny, tiny_cfg):
     assert cache.num_free_blocks == cache.num_blocks
 
 
+def test_stop_ids_truncate_and_stop_early(hf_tiny, tiny_cfg):
+    """Each output ends at its first stop token; the loop ends once all stop."""
+    model, cache = _ours(hf_tiny, tiny_cfg)
+    full = generate(model, cache, PROMPTS, max_new_tokens=8)
+    stop = {full[0][2], full[1][4]}  # tokens these sequences will emit
+    out = generate(model, cache, PROMPTS, max_new_tokens=8, stop_ids=stop)
+    for f, o in zip(full, out):
+        cut = next((j + 1 for j, x in enumerate(f) if x in stop), len(f))
+        assert o == f[:cut]
+    assert cache.num_free_blocks == cache.num_blocks
+
+
 def test_fnuz_conversion_is_lossless():
     torch.manual_seed(0)
     w = torch.randn(64, 32) * 3
