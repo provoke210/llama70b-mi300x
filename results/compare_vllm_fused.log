@@ -1,0 +1,14 @@
+== ours (Triton + HIP graph)
+batch=1: 26.19 ms/step decode, 38 tok/s
+batch=8: 27.42 ms/step decode, 292 tok/s
+batch=32: 30.54 ms/step decode, 1048 tok/s
+== vLLM default
+batch=1: 28.75 ms/step decode, 35 tok/s
+batch=8: 29.48 ms/step decode, 271 tok/s
+batch=32: 31.52 ms/step decode, 1015 tok/s
+== vLLM AITER
+batch=1: 27.25 ms/step decode, 37 tok/s
+batch=8: 27.95 ms/step decode, 286 tok/s
+batch=32: 30.14 ms/step decode, 1062 tok/s
+== greedy agreement (of 80): ours~vLLM 15, ours~vLLM-AITER 15, vLLM~vLLM-AITER 42
+DONE

@@ -1,0 +1,199 @@
+# llama70b-mi300x
+
+Llama-3.3-70B FP8 decode on a single AMD Instinct MI300X, with hand-written
+Triton kernels, measured against the hardware roofline and vLLM-ROCm.
+
+## Why this is interesting
+
+- **Decode is memory-bound.** Every step reads all ~70 GB of FP8 weights. At the
+  MI300X's 5.3 TB/s that is a floor of ~13 ms per step (~75 tok/s at batch 1).
+  How close each kernel gets to that bandwidth is the headline metric.
+- **192 GB on one GPU.** FP8 weights take ~70 GB, leaving ~110 GB of KV cache
+  (~0.31 MB/token in BF16, so ~350k tokens) -- no tensor parallelism needed.
+- **FP8 is a different format on MI300X.** Checkpoints use OCP `e4m3fn` (max 448);
+  gfx942 computes in `e4m3fnuz` (max 240, exponent bias 8, no negative zero).
+  `mi300_llm/fp8.py` converts by reinterpreting bits and doubling the scale,
+  which is lossless (tested).
+
+## Layout
+
+| Path | What |
+|---|---|
+| `mi300_llm/ref_ops.py` | Pure-PyTorch reference for every op |
+| `mi300_llm/kernels/` | Triton kernels: RMSNorm+residual, RoPE, SiLU-mul, per-token FP8 quant, FP8 GEMM, split-K paged decode attention |
+| `mi300_llm/ops.py` | Switches each op between `ref` and `triton` |
+| `mi300_llm/model.py` | Llama forward over a paged KV cache (fused QKV, fused gate/up) |
+| `mi300_llm/loader.py` | Loads BF16 or compressed-tensors FP8 safetensors |
+| `mi300_llm/engine.py` | Batched greedy generation (continuous batching: phase 2) |
+| `scripts/` | Droplet setup, generation + speed, kernel roofline benchmark |
+
+## Status
+
+| Phase | State |
+|---|---|
+| 1. Reference path matches Hugging Face (fp32, GQA, llama3 RoPE, multi-block paged KV) | Done |
+| 1. FP8 loader (compressed-tensors, fnuz conversion, QKV fusion) | Done |
+| 2. Triton kernels on MI300X: 39 tests pass, 70B generates coherent text | Done |
+| 3. Split-K GEMM + per-shape tuning, attention split heuristic, HIP graph decode | Done |
+| 4. Compare with vLLM-ROCm on the same workload | Done |
+| 5. Column-parallel quantization; RMSNorm + quant and SiLU-mul + quant fusion | Done |
+| 6. Tensor parallelism: sharded loading, all-reduce, vocab-parallel head; verified on CPU (gloo, TP=2/4) | Done; **not yet run on GPUs** |
+| Next: TP scaling on 8x MI300X vs vLLM (`scripts/compare_tp.sh`); task-accuracy check (e.g. GSM8K); faster decode attention | |
+
+## Tensor parallelism
+
+Megatron-style, one process per GPU (`torchrun`), see `mi300_llm/tp.py`:
+
+| Layer | Split | Communication |
+|---|---|---|
+| qkv | column-parallel: local query heads and KV heads (Llama-3.3-70B has 8 KV heads, so TP <= 8) | none |
+| attention | local heads only | none |
+| o | row-parallel | all-reduce |
+| gate_up | column-parallel over the FFN width | none |
+| down | row-parallel | all-reduce |
+| lm_head | vocab-parallel | all-gather of logits |
+| embed, norms | replicated | none |
+
+Per decode step: 160 all-reduces of a [batch, 8192] bf16 tensor (16 KB at
+batch 1, so latency-bound) and one logits all-gather. Weights are sharded at
+load time; with per-channel FP8, each row keeps the scale computed over the
+whole row, and row-parallel layers quantize their local activation slice with
+a local per-token scale.
+
+`tests/test_tp.py` runs TP=2 and 4 as gloo processes on CPU: fp32 tokens match
+the single-process model exactly (logits to 1e-4), FP8 tracks it, and every
+rank holds 1/W of the layer weights. Disabling the all-reduce makes the tests
+fail, so they do exercise it.
+
+```bash
+torchrun --nproc-per-node 8 scripts/run_generate.py <model> --graph --batch 1 8 32
+torchrun --nproc-per-node 8 scripts/bench_allreduce.py   # RCCL latency, eager and in a graph
+```
+
+On macOS, add `--master-addr 127.0.0.1` to torchrun (hostname rendezvous hangs).
+
+## Results (1x MI300X VF, ROCm 10.2, PyTorch 2.15, Triton 3.9)
+
+Measured streaming-read bandwidth is **3.6 TB/s** (`scripts/bench_bandwidth.py`),
+not the 5.3 TB/s spec, so the realistic batch-1 floor for 72.7 GB of weights is
+~20 ms/step.
+
+### Against vLLM
+
+Llama-3.3-70B-Instruct-FP8-dynamic, same prompt tokens, greedy, EOS ignored.
+Decode ms/step = (time for 80 tokens - time for 16 tokens) / 64, best of 3,
+warm, all three run back to back. vLLM is
+`rocm/vllm:rocm10.2.0_ubuntu24.04_py3.14-pytorch_2.14.0_vllm-0.32.0`
+(vLLM 0.32.1.dev), prefix caching off. Raw log: `results/compare_vllm_fused.log`.
+
+| batch | this repo (Triton + HIP graph, fused quant) | vLLM default (hipBLASLt GEMM) | vLLM `VLLM_ROCM_USE_AITER=1` |
+|---|---|---|---|
+| 1 | **26.2 ms** (38 tok/s) | 28.8 ms (35 tok/s) | 27.3 ms (37 tok/s) |
+| 8 | **27.4 ms** (292 tok/s) | 29.5 ms (271 tok/s) | 28.0 ms (286 tok/s) |
+| 32 | 30.5 ms (1048 tok/s) | 31.5 ms (1015 tok/s) | **30.1 ms** (1062 tok/s) |
+
+Faster than default vLLM at every batch size, 4% / 2% faster than vLLM with
+AITER at batch 1 / 8, and 1% slower at batch 32 (where decode attention
+starts to matter). AITER's 70B GEMM shapes are untuned in that image, per its
+own log. At batch 1 the engine streams 72.7 GB in 26.2 ms = 2.8 TB/s, ~77% of
+measured bandwidth.
+
+Before the quantization work (`results/compare_vllm.log`) this repo was at
+27.8 / 28.9 / 32.0 ms, 2-8% behind vLLM-AITER.
+
+Greedy outputs agree for the first 15 tokens with both vLLM runs; the two vLLM
+backends agree with each other for 42. Different FP8 accumulation orders flip
+near-ties, then the sequences diverge; all outputs read coherently. Token
+agreement is not an accuracy metric; a task benchmark is the next check.
+
+### Where a layer's time goes (`scripts/bench_layer.py`, batch 1)
+
+GPU time per kernel, replayed from a graph (plain `do_bench` reports ~6.4 us
+for every tiny kernel: that is the CPU launch floor). GEMMs whose weights fit
+the 256 MB Infinity Cache (qkv, o, down) read faster in this isolated loop
+than in real decode, where 70 GB of weights stream through.
+
+| | before | column-parallel quant | + fusion |
+|---|---|---|---|
+| us / layer | 294 | 280 | **274** |
+| down-proj input quant | 13.9 us (one program per row: one CU at batch 1) | 3.5 us | fused into SiLU-mul |
+
+### Optimization steps
+
+| batch | first working version | + split-K, tuned tiles, HIP graph |
+|---|---|---|
+| 1 | ~38 ms/step | 27.8 ms/step |
+| 32 | ~62 ms/step | 32.0 ms/step |
+
+(The first column was measured with an older, less careful method; treat it as
+approximate.)
+
+Per-layer FP8 GEMM time at batch 1 (us): 464 -> **328** after split-K and
+tuning, vs 402 for hipBLASLt (`torch._scaled_mm`) on the same shapes.
+
+Without the graph, split-K makes eager decode *slower* (52 ms/step at batch 1):
+the extra reduce launches add CPU launch overhead, which already dominates at
+~1600 launches per step. The graph removes it.
+
+### A measurement mistake worth remembering
+
+An earlier version timed decode as (N-token run - 1-token run). One of the
+1-token runs hit a first-time compile (261 ms instead of ~76 ms), which made
+every decode step look ~2.9 ms faster (25.0 instead of 27.8 ms at batch 1).
+Differencing two multi-token runs, best of 3, after warm-up fixes it.
+
+## Findings worth knowing
+
+- **torch tensor / Python-scalar division is not correctly rounded on ROCm GPUs.**
+  It made the reference FP8 quantizer disagree with a float64 computation on
+  0.08% of codes (values at rounding midpoints). Tensor / tensor is exact. The
+  Triton quantizer uses `tl.div_rn` and matches float64 bit for bit.
+- Triton's plain fp32 -> fp8 (fnuz) cast is round-to-nearest-even and
+  bit-identical to torch; requesting `fp_downcast_rounding="rtz"` for fnuz
+  crashes the Triton 3.9 AMD backend (assertion in `ConvertFpCastOpToLLVM`).
+- Under-occupancy, not bandwidth, limited the narrow GEMMs: N=8192 at
+  BLOCK_N=64 is 128 programs for 304 CUs. Split-K fixed it.
+- **Fusing a kernel can change its numerics even with identical source.**
+  Triton picks the register layout from the whole kernel: storing 1-byte FP8
+  instead of 2-byte bf16 changes sizePerThread from 8 to 16, which reorders
+  the RMSNorm row sum. `rstd` then differs by 1 ulp on ~19% of rows, about 1
+  in 5e6 outputs land on the other side of a bf16 rounding midpoint, and
+  greedy 70B decoding diverges from the unfused build after 14 tokens. The
+  fp32-to-bf16 casts themselves were checked to be exact round-to-nearest-even.
+  `MI300_FUSE_QUANT=0` switches the fusion off for A/B runs.
+
+## On the droplet
+
+On the AMD Developer Cloud PyTorch image, PyTorch and Triton live in a Docker
+container named `rocm`, not on the host; `/shared-docker` is shared between the
+two. Put the project and models there and run everything inside the container.
+
+### From VS Code
+
+1. After creating a droplet, set `HostName` of `Host mi300x` in `~/.ssh/config`
+   to its new IP.
+2. *Remote-SSH: Connect to Host* → `mi300x`.
+3. *Dev Containers: Attach to Running Container* → `rocm` (needs the Dev
+   Containers extension), then open `/shared-docker/llama70b-mi300x`.
+4. Open `notebooks/roofline.ipynb` and pick the container's Python kernel.
+
+### From a shell (inside the container: `ssh mi300x`, then `docker exec -it rocm bash`)
+
+```bash
+bash scripts/setup_mi300x.sh            # deps, 1B FP8 model, all tests
+python -m pytest tests -q               # kernel tests run on the GPU
+python scripts/run_generate.py ~/models/Llama-3.2-1B-Instruct-FP8-dynamic --compare-ref
+bash scripts/setup_mi300x.sh --with-70b # adds the ~73 GB 70B checkpoint
+python scripts/run_generate.py ~/models/Llama-3.3-70B-Instruct-FP8-dynamic --batch 1 8 32 --graph
+python scripts/bench_bandwidth.py       # achievable HBM bandwidth
+python scripts/tune_gemm.py             # writes mi300_llm/kernels/gemm_configs.json
+python scripts/bench_kernels.py --csv results/kernels.csv
+```
+
+Billing runs while a droplet exists, even powered off: destroy it after each session.
+
+## Locally (CPU)
+
+```bash
+python -m pytest tests -q   # reference + loader tests; kernel tests skip
+```

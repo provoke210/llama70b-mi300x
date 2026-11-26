@@ -1,0 +1,99 @@
+
+== batch=1, ctx=128, separate quant: 281 us/layer -> 22.4 ms/step (x80)
+  gemm(gate_up)              143.3 us   51.1%
+  gemm(down)                  50.4 us   17.9%
+  gemm(qkv)                   21.2 us    7.6%
+  gemm(o)                     19.8 us    7.1%
+  decode_attn                 15.2 us    5.4%
+  kv_write                     7.0 us    2.5%
+  quant(down)                  3.5 us    1.2%
+  quant(gate_up)               3.4 us    1.2%
+  quant(qkv)                   3.4 us    1.2%
+  quant(o)                     3.4 us    1.2%
+  add_rmsnorm(post)            2.6 us    0.9%
+  add_rmsnorm(in)              2.5 us    0.9%
+  rope(q)                      1.8 us    0.6%
+  silu_mul                     1.6 us    0.6%
+  rope(k)                      1.6 us    0.6%
+  by group: gemm 84%, quant(+fused producers) 5%, attention 5%, other 6%
+
+== batch=1, ctx=128, fused quant: 276 us/layer -> 22.1 ms/step (x80)
+  gemm(gate_up)              143.6 us   52.0%
+  gemm(down)                  50.4 us   18.2%
+  gemm(qkv)                   21.3 us    7.7%
+  gemm(o)                     19.7 us    7.1%
+  decode_attn                 15.2 us    5.5%
+  kv_write                     7.0 us    2.5%
+  add_rmsnorm_quant(post)      4.1 us    1.5%
+  add_rmsnorm_quant(in)        4.1 us    1.5%
+  silu_mul_quant               4.0 us    1.4%
+  quant(o)                     3.4 us    1.2%
+  rope(q)                      1.8 us    0.6%
+  rope(k)                      1.6 us    0.6%
+  by group: gemm 85%, quant(+fused producers) 6%, attention 6%, other 4%
+
+== batch=8, ctx=128, separate quant: 291 us/layer -> 23.3 ms/step (x80)
+  gemm(gate_up)              146.2 us   50.3%
+  gemm(down)                  51.1 us   17.6%
+  gemm(qkv)                   22.4 us    7.7%
+  gemm(o)                     20.5 us    7.1%
+  decode_attn                 17.9 us    6.2%
+  kv_write                     7.8 us    2.7%
+  quant(down)                  3.6 us    1.2%
+  quant(gate_up)               3.5 us    1.2%
+  quant(qkv)                   3.5 us    1.2%
+  quant(o)                     3.4 us    1.2%
+  add_rmsnorm(post)            2.7 us    0.9%
+  add_rmsnorm(in)              2.7 us    0.9%
+  rope(q)                      1.9 us    0.6%
+  silu_mul                     1.7 us    0.6%
+  rope(k)                      1.7 us    0.6%
+  by group: gemm 83%, quant(+fused producers) 5%, attention 6%, other 6%
+
+== batch=8, ctx=128, fused quant: 286 us/layer -> 22.9 ms/step (x80)
+  gemm(gate_up)              146.4 us   51.2%
+  gemm(down)                  51.2 us   17.9%
+  gemm(qkv)                   22.5 us    7.8%
+  gemm(o)                     20.6 us    7.2%
+  decode_attn                 17.9 us    6.3%
+  kv_write                     7.8 us    2.7%
+  add_rmsnorm_quant(in)        4.3 us    1.5%
+  add_rmsnorm_quant(post)      4.3 us    1.5%
+  silu_mul_quant               4.0 us    1.4%
+  quant(o)                     3.5 us    1.2%
+  rope(q)                      1.9 us    0.6%
+  rope(k)                      1.7 us    0.6%
+  by group: gemm 84%, quant(+fused producers) 6%, attention 6%, other 4%
+
+== batch=32, ctx=128, separate quant: 330 us/layer -> 26.4 ms/step (x80)
+  gemm(gate_up)              167.0 us   50.6%
+  gemm(down)                  58.6 us   17.8%
+  gemm(qkv)                   29.2 us    8.9%
+  gemm(o)                     21.3 us    6.4%
+  decode_attn                 19.4 us    5.9%
+  kv_write                     7.9 us    2.4%
+  quant(down)                  4.2 us    1.3%
+  quant(o)                     3.6 us    1.1%
+  quant(gate_up)               3.5 us    1.1%
+  quant(qkv)                   3.5 us    1.1%
+  add_rmsnorm(post)            2.8 us    0.8%
+  add_rmsnorm(in)              2.8 us    0.8%
+  silu_mul                     2.4 us    0.7%
+  rope(q)                      2.0 us    0.6%
+  rope(k)                      1.6 us    0.5%
+  by group: gemm 84%, quant(+fused producers) 4%, attention 6%, other 6%
+
+== batch=32, ctx=128, fused quant: 325 us/layer -> 26.0 ms/step (x80)
+  gemm(gate_up)              167.1 us   51.4%
+  gemm(down)                  58.7 us   18.1%
+  gemm(qkv)                   29.2 us    9.0%
+  gemm(o)                     21.3 us    6.6%
+  decode_attn                 19.5 us    6.0%
+  kv_write                     7.9 us    2.4%
+  silu_mul_quant               5.5 us    1.7%
+  add_rmsnorm_quant(post)      4.4 us    1.3%
+  add_rmsnorm_quant(in)        4.4 us    1.3%
+  quant(o)                     3.5 us    1.1%
+  rope(q)                      2.0 us    0.6%
+  rope(k)                      1.6 us    0.5%
+  by group: gemm 85%, quant(+fused producers) 5%, attention 6%, other 4%

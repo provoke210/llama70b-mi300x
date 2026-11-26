@@ -1,0 +1,19 @@
+# Output of `python scripts/tune_gemm.py --batches 1 8 32` on 1x MI300X VF,
+# 2026-11-25. "heuristic" is the split-K heuristic in fp8_gemm.py, not the
+# original no-split baseline (see kernels_baseline.csv for that). The winners
+# are in mi300_llm/kernels/gemm_configs.json. Times come from triton do_bench
+# outside a graph, so they include launch overhead; qkv/o/down weights fit the
+# 256 MB Infinity Cache and read faster here than in real decode.
+
+qkv      M=1   heuristic    54.3 us -> best    27.9 us (3.01 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 64, 'BLOCK_K': 256, 'GROUP_M': 1, 'SPLIT_K': 8, 'num_warps': 4, 'num_stages': 2}
+qkv      M=8   heuristic    52.1 us -> best    30.1 us (2.79 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 64, 'BLOCK_K': 256, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 4, 'num_stages': 2}
+qkv      M=32  heuristic    68.3 us -> best    51.6 us (1.63 TB/s) {'BLOCK_M': 32, 'BLOCK_N': 128, 'BLOCK_K': 128, 'GROUP_M': 1, 'SPLIT_K': 8, 'num_warps': 4, 'num_stages': 2}
+o        M=1   heuristic    41.4 us -> best    24.6 us (2.73 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 32, 'BLOCK_K': 512, 'GROUP_M': 1, 'SPLIT_K': 2, 'num_warps': 4, 'num_stages': 2}
+o        M=8   heuristic    41.2 us -> best    25.4 us (2.65 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 32, 'BLOCK_K': 512, 'GROUP_M': 1, 'SPLIT_K': 2, 'num_warps': 4, 'num_stages': 2}
+o        M=32  heuristic    49.8 us -> best    32.6 us (2.06 TB/s) {'BLOCK_M': 32, 'BLOCK_N': 128, 'BLOCK_K': 128, 'GROUP_M': 1, 'SPLIT_K': 8, 'num_warps': 4, 'num_stages': 2}
+gate_up  M=1   heuristic   188.2 us -> best   174.1 us (2.70 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 128, 'BLOCK_K': 128, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 4, 'num_stages': 2}
+gate_up  M=8   heuristic   189.0 us -> best   182.4 us (2.58 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 128, 'BLOCK_K': 128, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 4, 'num_stages': 2}
+gate_up  M=32  heuristic   272.4 us -> best   200.4 us (2.34 TB/s) {'BLOCK_M': 32, 'BLOCK_N': 128, 'BLOCK_K': 128, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 4, 'num_stages': 2}
+down     M=1   heuristic   113.5 us -> best   101.1 us (2.32 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 128, 'BLOCK_K': 256, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 8, 'num_stages': 2}
+down     M=8   heuristic   114.9 us -> best   102.0 us (2.30 TB/s) {'BLOCK_M': 16, 'BLOCK_N': 128, 'BLOCK_K': 256, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 8, 'num_stages': 2}
+down     M=32  heuristic   133.9 us -> best   105.9 us (2.22 TB/s) {'BLOCK_M': 32, 'BLOCK_N': 128, 'BLOCK_K': 256, 'GROUP_M': 1, 'SPLIT_K': 4, 'num_warps': 4, 'num_stages': 2}

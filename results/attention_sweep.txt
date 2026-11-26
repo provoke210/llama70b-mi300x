@@ -1,0 +1,16 @@
+# Output of scripts/investigations/sweep_attn.py on 1x MI300X VF, 2026-11-25:
+# decode attention, Hq=64, Hkv=8, D=128, page 16. "current" is the split
+# heuristic before this sweep (block_n=64, splits = cdiv(len, 512) <= 16);
+# the sweep result became default_num_splits() with block_n=32. Times come
+# from triton do_bench outside a graph, so small cases sit on a ~36-42 us
+# launch floor regardless of splits.
+
+B=1   ctx=1024   current    50.6 us | best    42.4 us splits=8   block_n=64   programs=64    0.10 TB/s
+B=1   ctx=4096   current    50.8 us | best    42.6 us splits=128 block_n=32   programs=1024  0.39 TB/s
+B=1   ctx=16384  current    95.5 us | best    53.0 us splits=64  block_n=64   programs=512   1.27 TB/s
+B=8   ctx=1024   current    50.6 us | best    36.2 us splits=16  block_n=32   programs=1024  0.93 TB/s
+B=8   ctx=4096   current   102.7 us | best    97.0 us splits=32  block_n=32   programs=2048  1.38 TB/s
+B=8   ctx=16384  current   348.6 us | best   324.5 us splits=32  block_n=32   programs=2048  1.65 TB/s
+B=32  ctx=1024   current   102.9 us | best    97.4 us splits=8   block_n=32   programs=2048  1.38 TB/s
+B=32  ctx=4096   current   331.4 us | best   324.8 us splits=8   block_n=32   programs=2048  1.65 TB/s
+B=32  ctx=16384  current  1262.3 us | best  1232.3 us splits=32  block_n=32   programs=8192  1.74 TB/s

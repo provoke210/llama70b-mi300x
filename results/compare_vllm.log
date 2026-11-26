@@ -1,0 +1,20 @@
+== ours (Triton + HIP graph)
+batch=1: 27.94 ms/step decode, 36 tok/s
+batch=8: 29.03 ms/step decode, 276 tok/s
+batch=32: 32.04 ms/step decode, 999 tok/s
+== vLLM default
+batch=1: 28.33 ms/step decode, 35 tok/s
+batch=8: 29.06 ms/step decode, 275 tok/s
+batch=32: 31.05 ms/step decode, 1031 tok/s
+== vLLM AITER
+batch=1: 27.14 ms/step decode, 37 tok/s
+batch=8: 27.35 ms/step decode, 293 tok/s
+batch=32: 29.70 ms/step decode, 1077 tok/s
+== greedy agreement (of 144): ours~vLLM 14, ours~vLLM-AITER 14, vLLM~vLLM-AITER 42
+DONE
+
+# NOTE: the "ours" block above used a 128-token window by mistake (vLLM used 64).
+# Re-measured with --new-tokens 64 (the numbers in README):
+# batch=1: 27.77 ms/step decode, 36 tok/s
+# batch=8: 28.92 ms/step decode, 277 tok/s
+# batch=32: 31.98 ms/step decode, 1001 tok/s
