@@ -16,7 +16,6 @@ import json
 import time
 from pathlib import Path
 
-PROMPT = "Explain in three sentences why LLM decoding is memory-bandwidth bound."
 SHORT = 16  # keep in sync with run_generate.py
 
 
@@ -27,19 +26,21 @@ def main():
     ap.add_argument("--new-tokens", type=int, default=64)
     ap.add_argument("--save-tokens", default="results/vllm_tokens.json")
     ap.add_argument("--tp", type=int, default=1, help="tensor_parallel_size")
+    ap.add_argument("--prompt-len", type=int, help="pad the prompt with filler tokens to this length")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
+    from prompts import prompt_ids
+
     tok = AutoTokenizer.from_pretrained(args.model)
-    text = tok.apply_chat_template([{"role": "user", "content": PROMPT}], add_generation_prompt=True, tokenize=False)
-    ids = tok.encode(text, add_special_tokens=False)
+    ids = prompt_ids(tok, args.prompt_len)
 
     t0 = time.time()
     llm = LLM(
         model=args.model,
-        max_model_len=4096,
+        max_model_len=max(4096, len(ids) + SHORT + args.new_tokens + 64),
         gpu_memory_utilization=0.9,
         enable_prefix_caching=False,
         max_num_seqs=max(args.batch),
@@ -61,7 +62,7 @@ def main():
         t_short = min(run(bs, short)[0] for _ in range(3))
         t_long, outs = min((run(bs, long) for _ in range(3)), key=lambda r: r[0])
         step = (t_long - t_short) / args.new_tokens
-        print(f"TP={args.tp} batch={bs}: {step * 1e3:.2f} ms/step decode, {bs / step:.0f} tok/s")
+        print(f"TP={args.tp} ctx={len(ids)} batch={bs}: {step * 1e3:.2f} ms/step decode, {bs / step:.0f} tok/s")
         results[bs] = list(outs[0].outputs[0].token_ids)
     print("---\n" + tok.decode(results[args.batch[0]]))
     Path(args.save_tokens).parent.mkdir(parents=True, exist_ok=True)

@@ -76,7 +76,11 @@ class GraphDecoder:
             self.logits = model.forward(self.ids, self.pos, self.meta, cache)
 
     def __call__(self, cache: KVCache, seqs: list[Sequence]) -> torch.Tensor:
-        x = _decode_inputs(cache, seqs, self.width)
+        return self.replay(_decode_inputs(cache, seqs, self.width))
+
+    def replay(self, x: dict) -> torch.Tensor:
+        """Run the captured step on host tensors shaped like ``_decode_inputs``
+        output (rows = the captured batch, tables = the captured width)."""
         self.ids.copy_(x["ids"], non_blocking=True)
         self.pos.copy_(x["pos"], non_blocking=True)
         self.slots.copy_(x["slots"], non_blocking=True)

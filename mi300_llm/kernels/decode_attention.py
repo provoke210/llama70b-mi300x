@@ -8,6 +8,14 @@ softmax results using their log-sum-exp.
 GQA: each program handles all ``group = Hq / Hkv`` query heads that share one KV
 head (8 for Llama-3.3-70B), so every K/V tile is read once per group, not once
 per query head.
+
+Changes from the first version:
+- Softmax runs in base 2 (``exp2``; the 1/sqrt(d) scale is folded with log2 e
+  into one multiply), which is cheaper than ``exp`` on the GPU.
+- With a single split (short contexts) the kernel writes the normalized output
+  directly and the merge kernel is not launched: one launch per layer less.
+- Tile size, warps and pipeline stages are parameters, so they can be swept
+  per (batch, context) bucket (``scripts/tune_attention.py``).
 """
 
 from __future__ import annotations
@@ -16,19 +24,25 @@ import torch
 import triton
 import triton.language as tl
 
+LOG2E = 1.4426950408889634
+
 
 @triton.jit
 def _decode_split_kernel(
     q_ptr, k_ptr, v_ptr, bt_ptr, len_ptr, o_ptr, lse_ptr,
-    scale, tokens_per_split,
+    scale_log2, tokens_per_split,
     stride_qb, stride_qh,
     stride_kslot, stride_kh,
     stride_btb,
     stride_ob, stride_oh, stride_os,
     stride_lb, stride_lh,
     GROUP: tl.constexpr, BLOCK_G: tl.constexpr, HEAD_DIM: tl.constexpr,
-    BLOCK_N: tl.constexpr, PAGE: tl.constexpr,
+    BLOCK_N: tl.constexpr, PAGE: tl.constexpr, SINGLE: tl.constexpr,
 ):
+    """One (sequence, KV head, split). With SINGLE, ``o_ptr`` is the final
+    [B, Hq, D] output (activation dtype) and ``stride_os`` is unused;
+    otherwise it is the fp32 partial buffer [B, Hq, S, D] and log2-sum-exp
+    values go to ``lse_ptr``."""
     b = tl.program_id(0).to(tl.int64)
     kvh = tl.program_id(1).to(tl.int64)
     split = tl.program_id(2)
@@ -53,13 +67,13 @@ def _decode_split_kernel(
         slot = block * PAGE + pos % PAGE
         kv_off = slot[:, None] * stride_kslot + kvh * stride_kh + d[None, :]
         k = tl.load(k_ptr + kv_off, mask=n_mask[:, None], other=0.0)
-        s = tl.dot(q, tl.trans(k)) * scale  # [BLOCK_G, BLOCK_N]
+        v = tl.load(v_ptr + kv_off, mask=n_mask[:, None], other=0.0)  # issued early to overlap with the math
+        s = tl.dot(q, tl.trans(k)) * scale_log2  # [BLOCK_G, BLOCK_N], log2 domain
         s = tl.where(n_mask[None, :], s, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(s, axis=1))
-        alpha = tl.exp(m_i - m_new)
-        p = tl.exp(s - m_new[:, None])
+        alpha = tl.exp2(m_i - m_new)
+        p = tl.exp2(s - m_new[:, None])
         l_i = l_i * alpha + tl.sum(p, axis=1)
-        v = tl.load(v_ptr + kv_off, mask=n_mask[:, None], other=0.0)
         acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
         m_i = m_new
 
@@ -67,9 +81,14 @@ def _decode_split_kernel(
     # and a zero partial so the merge ignores them.
     has = l_i > 0
     out = tl.where(has[:, None], acc / tl.where(has, l_i, 1.0)[:, None], 0.0)
-    lse = tl.where(has, m_i + tl.log(tl.where(has, l_i, 1.0)), float("-inf"))
-    tl.store(o_ptr + b * stride_ob + qh[:, None] * stride_oh + split * stride_os + d[None, :], out, mask=g_mask[:, None])
-    tl.store(lse_ptr + b * stride_lb + qh * stride_lh + split, lse, mask=g_mask)
+    if SINGLE:
+        tl.store(o_ptr + b * stride_ob + qh[:, None] * stride_oh + d[None, :], out.to(o_ptr.dtype.element_ty),
+                 mask=g_mask[:, None])
+    else:
+        lse = tl.where(has, m_i + tl.log2(tl.where(has, l_i, 1.0)), float("-inf"))
+        tl.store(o_ptr + b * stride_ob + qh[:, None] * stride_oh + split * stride_os + d[None, :], out,
+                 mask=g_mask[:, None])
+        tl.store(lse_ptr + b * stride_lb + qh * stride_lh + split, lse, mask=g_mask)
 
 
 @triton.jit
@@ -85,7 +104,7 @@ def _decode_merge_kernel(
     s_mask = s < num_splits
     lse = tl.load(lse_ptr + b * stride_lb + h * stride_lh + s, mask=s_mask, other=float("-inf"))
     m = tl.max(lse, axis=0)
-    w = tl.exp(lse - m)
+    w = tl.exp2(lse - m)
     w = w / tl.sum(w, axis=0)
     part = tl.load(o_part_ptr + b * stride_pb + h * stride_ph + s[:, None] * stride_ps + d[None, :], mask=s_mask[:, None], other=0.0)
     out = tl.sum(part * w[:, None], axis=0)
@@ -93,13 +112,23 @@ def _decode_merge_kernel(
 
 
 def default_num_splits(batch: int, kv_heads: int, max_len: int) -> int:
-    """Measured on MI300X (scripts in README): aim for ~2048 programs, but keep
-    at least 128 tokens per split so the merge stays cheap."""
+    """Measured on MI300X (results/attention_sweep.txt): aim for ~2048
+    programs, but keep at least 128 tokens per split so the merge stays cheap."""
     want = triton.next_power_of_2(triton.cdiv(2048, batch * kv_heads))
     return max(1, min(want, max_len // 128, 128))
 
 
-def paged_decode_attention(q, k_cache, v_cache, block_tables, seq_lens, scale, num_splits=None, block_n=32):
+# Launch parameters other than the split count, from the sweep in
+# scripts/tune_attention.py (results/attention_tune.txt): the best single
+# config over 8 (batch, context) points, within 3.7% (geomean) of each point's
+# own best. It is 2.0-2.3x faster than Triton's defaults (4 warps, default
+# pipelining) on long contexts. Most of that comes from num_stages=1:
+# software pipelining did not pay off for these block-table-indexed K/V loads.
+DEFAULT_LAUNCH = dict(block_n=64, num_warps=2, num_stages=1)
+
+
+def paged_decode_attention(q, k_cache, v_cache, block_tables, seq_lens, scale, num_splits=None,
+                           block_n=None, num_warps=None, num_stages=None):
     """Same contract as ``ref_ops.paged_decode_attention``.
 
     The split count is derived from the block-table width (an upper bound on
@@ -110,31 +139,43 @@ def paged_decode_attention(q, k_cache, v_cache, block_tables, seq_lens, scale, n
     _, page, Hkv, _ = k_cache.shape
     assert k_cache.is_contiguous() and v_cache.is_contiguous() and q.stride(-1) == 1
     assert D == triton.next_power_of_2(D)
+    block_n = block_n or DEFAULT_LAUNCH["block_n"]
+    launch = dict(num_warps=num_warps or DEFAULT_LAUNCH["num_warps"])
+    if (num_stages or DEFAULT_LAUNCH["num_stages"]) is not None:
+        launch["num_stages"] = num_stages or DEFAULT_LAUNCH["num_stages"]
     group = Hq // Hkv
     max_len = block_tables.shape[1] * page
     if num_splits is None:
         num_splits = default_num_splits(B, Hkv, max_len)
     tokens_per_split = triton.cdiv(triton.cdiv(max_len, num_splits), block_n) * block_n
+    single = num_splits == 1
 
-    o_part = torch.empty((B, Hq, num_splits, D), dtype=torch.float32, device=q.device)
-    lse = torch.empty((B, Hq, num_splits), dtype=torch.float32, device=q.device)
+    out = torch.empty_like(q)
+    if single:
+        o_part, lse = out, out  # lse is not written on this path
+        so = (out.stride(0), out.stride(1), 0)
+        sl = (0, 0)
+    else:
+        o_part = torch.empty((B, Hq, num_splits, D), dtype=torch.float32, device=q.device)
+        lse = torch.empty((B, Hq, num_splits), dtype=torch.float32, device=q.device)
+        so = (o_part.stride(0), o_part.stride(1), o_part.stride(2))
+        sl = (lse.stride(0), lse.stride(1))
     k_flat = k_cache.view(-1, Hkv, D)
     _decode_split_kernel[(B, Hkv, num_splits)](
         q, k_flat, v_cache.view(-1, Hkv, D), block_tables, seq_lens, o_part, lse,
-        scale, tokens_per_split,
+        scale * LOG2E, tokens_per_split,
         q.stride(0), q.stride(1),
         k_flat.stride(0), k_flat.stride(1),
         block_tables.stride(0),
-        o_part.stride(0), o_part.stride(1), o_part.stride(2),
-        lse.stride(0), lse.stride(1),
+        *so, *sl,
         GROUP=group, BLOCK_G=max(16, triton.next_power_of_2(group)), HEAD_DIM=D,
-        BLOCK_N=block_n, PAGE=page,
+        BLOCK_N=block_n, PAGE=page, SINGLE=single, **launch,
     )
-    out = torch.empty_like(q)
-    _decode_merge_kernel[(B, Hq)](
-        o_part, lse, out, num_splits,
-        o_part.stride(0), o_part.stride(1), o_part.stride(2), lse.stride(0), lse.stride(1),
-        out.stride(0), out.stride(1),
-        HEAD_DIM=D, BLOCK_S=triton.next_power_of_2(num_splits),
-    )
+    if not single:
+        _decode_merge_kernel[(B, Hq)](
+            o_part, lse, out, num_splits,
+            o_part.stride(0), o_part.stride(1), o_part.stride(2), lse.stride(0), lse.stride(1),
+            out.stride(0), out.stride(1),
+            HEAD_DIM=D, BLOCK_S=triton.next_power_of_2(num_splits),
+        )
     return out

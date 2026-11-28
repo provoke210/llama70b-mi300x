@@ -112,20 +112,48 @@ def run_ours(args):
     model = load_pretrained(args.model, device="cuda", fp8_dtype=compute_fp8_dtype())
     block = 16
     per_block = KVCache.bytes_per_token(model.cfg, torch.bfloat16) * block
-    cache = KVCache(model.cfg, int(args.kv_gib * 2**30 // per_block), block, torch.bfloat16, "cuda")
     ops.set_backend("triton")
-    # One graph width for every batch, so each batch size is captured once.
-    width = (max(map(len, prompts)) + args.max_new_tokens + block - 1) // block
-    graphs: dict = {}
-    outputs, t0 = [], time.time()
-    for b in range(0, len(prompts), args.batch):
-        chunk = prompts[b : b + args.batch]
-        outputs += generate(model, cache, chunk, args.max_new_tokens, use_graph=True, graphs=graphs,
-                            stop_ids=stops, graph_width=width)
-        done = b + len(chunk)
-        print(f"  {done}/{len(prompts)} questions, {time.time() - t0:.0f}s", flush=True)
     meta = dict(engine="ours", model=args.model, max_new_tokens=args.max_new_tokens, batch=args.batch,
-                seconds=time.time() - t0, fuse_quant=__import__("mi300_llm.model").model.FUSE_QUANT)
+                fuse_quant=__import__("mi300_llm.model").model.FUSE_QUANT)
+    if args.continuous:
+        from mi300_llm.scheduler import ContinuousBatchingEngine, Request
+
+        cache = KVCache(model.cfg, int(args.kv_gib * 2**30 // per_block), block, torch.bfloat16, "cuda",
+                        reserve_scratch_block=True)
+        eng = ContinuousBatchingEngine(model, cache, max_num_seqs=args.batch,
+                                       max_model_len=max(map(len, prompts)) + args.max_new_tokens + 1,
+                                       use_graph=True, admit_min=args.admit_min)
+        eng.capture_graphs()
+        # Warm up outside the timed region (Triton JIT for mixed-step shapes).
+        eng.run([Request(-1 - i, p, 8, frozenset(stops)) for i, p in enumerate(prompts[:16])])
+        from mi300_llm.scheduler import Stats
+
+        eng.stats = Stats()
+        reqs = [Request(i, p, args.max_new_tokens, frozenset(stops)) for i, p in enumerate(prompts)]
+        t0 = time.time()
+        eng.run(reqs)
+        meta["seconds"] = time.time() - t0
+        st = eng.stats
+        meta.update(engine="ours_continuous", scheduler=dict(
+            steps=st.steps, mixed_steps=st.mixed_steps, graph_steps=st.graph_steps,
+            eager_decode_steps=st.eager_decode_steps, mean_decode_batch=round(st.mean_decode_batch, 2),
+            padded_rows=st.padded_rows, preemptions=st.preemptions, admit_min=eng.admit_min))
+        print(f"  scheduler: {meta['scheduler']}")
+        # Same output convention as the static path: the stop token is kept.
+        outputs = [r.output for r in reqs]
+    else:
+        # Static batches. One graph width for every batch, so each batch size is captured once.
+        cache = KVCache(model.cfg, int(args.kv_gib * 2**30 // per_block), block, torch.bfloat16, "cuda")
+        width = (max(map(len, prompts)) + args.max_new_tokens + block - 1) // block
+        graphs: dict = {}
+        outputs, t0 = [], time.time()
+        for b in range(0, len(prompts), args.batch):
+            chunk = prompts[b : b + args.batch]
+            outputs += generate(model, cache, chunk, args.max_new_tokens, use_graph=True, graphs=graphs,
+                                stop_ids=stops, graph_width=width)
+            done = b + len(chunk)
+            print(f"  {done}/{len(prompts)} questions, {time.time() - t0:.0f}s", flush=True)
+        meta["seconds"] = time.time() - t0
     write_results(args.out, qs, outputs, tok, meta)
 
 
@@ -162,6 +190,8 @@ def report(args):
     for path in args.files:
         lines = Path(path).read_text().splitlines()
         meta, rows = json.loads(lines[0])["meta"], [json.loads(x) for x in lines[1:]]
+        # Label by file name: two runs of the same engine must not overwrite each other.
+        meta["engine"] = Path(path).stem.removeprefix("gsm8k_")
         runs[meta["engine"]] = {r["id"]: r for r in rows}
         k, n = sum(r["correct"] for r in rows), len(rows)
         lo, hi = wilson(k, n)
@@ -194,6 +224,8 @@ def main():
         p.add_argument("--batch", type=int, default=32)
         p.add_argument("--max-new-tokens", type=int, default=512)
         p.add_argument("--kv-gib", type=float, default=20.0)
+        p.add_argument("--continuous", action="store_true", help="ours: continuous batching scheduler instead of static batches")
+        p.add_argument("--admit-min", type=int, help="ours --continuous: free slots needed before admitting (default max_num_seqs // 8)")
     p = sub.add_parser("report")
     p.add_argument("files", nargs="+")
     args = ap.parse_args()

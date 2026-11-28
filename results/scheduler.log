@@ -1,0 +1,32 @@
+== 03:58:12 setup
+[90mHint: The `hf-cli` skill is not installed. Run `hf skills add -g` to teach your AI agents how to use the `hf` CLI.[0m
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+/shared-docker/models/Llama-3.3-70B-Instruct-FP8-dynamic
+== 03:59:00 tests
+.....................................................................    [100%]
+69 passed in 46.41s
+== 03:59:50 continuous, admit_min=4 (default)
+  scheduler: {'steps': 9136, 'mixed_steps': 318, 'graph_steps': 8818, 'eager_decode_steps': 0, 'mean_decode_batch': 29.64, 'padded_rows': 14048, 'preemptions': 0, 'admit_min': 4}
+ours_continuous: 1266/1319 = 95.98%  (330s) -> results/gsm8k_ours_continuous.jsonl
+== 04:06:04 continuous, admit_min=1
+  scheduler: {'steps': 8626, 'mixed_steps': 1179, 'graph_steps': 7447, 'eager_decode_steps': 0, 'mean_decode_batch': 31.25, 'padded_rows': 1138, 'preemptions': 0, 'admit_min': 1}
+ours_continuous: 1257/1319 = 95.30%  (343s) -> results/gsm8k_ours_continuous_admit1.jsonl
+== 04:12:16 vLLM + AITER
+vllm+aiter: 1257/1319 = 95.30%  (291s) -> results/gsm8k_vllm_aiter_rerun.jsonl
+== 04:19:40 report
+ours_continuous  1266/1319 = 95.98%  95% CI [94.78%, 96.91%]  no '####': 20  hit max tokens: 13  (330s)
+ours_continuous_admit1  1257/1319 = 95.30%  95% CI [94.02%, 96.32%]  no '####': 13  hit max tokens: 11  (343s)
+ours_attn_v2  1268/1319 = 96.13%  95% CI [94.95%, 97.05%]  no '####': 19  hit max tokens: 10  (591s)
+vllm_aiter_rerun  1257/1319 = 95.30%  95% CI [94.02%, 96.32%]  no '####': 33  hit max tokens: 12  (291s)
+vllm_aiter    1262/1319 = 95.68%  95% CI [94.44%, 96.65%]  no '####': 25  hit max tokens: 9  (291s)
+ours_continuous vs ours_continuous_admit1: both correct 1255, only ours_continuous 11, only ours_continuous_admit1 2; same answer 1291/1319, identical response 304/1319
+ours_continuous vs ours_attn_v2: both correct 1261, only ours_continuous 5, only ours_attn_v2 7; same answer 1295/1319, identical response 464/1319
+ours_continuous vs vllm_aiter_rerun: both correct 1248, only ours_continuous 18, only vllm_aiter_rerun 9; same answer 1272/1319, identical response 124/1319
+ours_continuous vs vllm_aiter: both correct 1251, only ours_continuous 15, only vllm_aiter 11; same answer 1272/1319, identical response 139/1319
+ours_continuous_admit1 vs ours_attn_v2: both correct 1254, only ours_continuous_admit1 3, only ours_attn_v2 14; same answer 1288/1319, identical response 334/1319
+ours_continuous_admit1 vs vllm_aiter_rerun: both correct 1243, only ours_continuous_admit1 14, only vllm_aiter_rerun 14; same answer 1268/1319, identical response 136/1319
+ours_continuous_admit1 vs vllm_aiter: both correct 1245, only ours_continuous_admit1 12, only vllm_aiter 17; same answer 1267/1319, identical response 137/1319
+ours_attn_v2 vs vllm_aiter_rerun: both correct 1248, only ours_attn_v2 20, only vllm_aiter_rerun 9; same answer 1274/1319, identical response 126/1319
+ours_attn_v2 vs vllm_aiter: both correct 1253, only ours_attn_v2 15, only vllm_aiter 9; same answer 1276/1319, identical response 141/1319
+vllm_aiter_rerun vs vllm_aiter: both correct 1248, only vllm_aiter_rerun 9, only vllm_aiter 14; same answer 1279/1319, identical response 315/1319
+== 04:19:40 DONE

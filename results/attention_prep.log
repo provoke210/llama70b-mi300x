@@ -1,0 +1,59 @@
+== 02:27:21 setup
+[90mHint: The `hf-cli` skill is not installed. Run `hf skills add -g` to teach your AI agents how to use the `hf` CLI.[0m
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+/shared-docker/models/Llama-3.3-70B-Instruct-FP8-dynamic
+== 02:28:14 tests
+=========================== short test summary info ============================
+FAILED tests/test_kernels.py::test_tiny_model_triton_matches_ref - assert [28...
+1 failed, 61 passed in 38.43s
+== 02:28:55 sweep
+  skip (128, 2, 2) split=4: OutOfResources
+  skip (128, 2, 2) split=8: OutOfResources
+  skip (128, 2, 3) split=4: OutOfResources
+  skip (128, 2, 3) split=8: OutOfResources
+B=1   ctx=1024   v1    15.8 us | default    16.0 us | best     6.6 us (0.63 TB/s) split=16 block_n=64 warps=4 stages=1
+  skip (128, 2, 2) split=32: OutOfResources
+  skip (128, 2, 2) split=64: OutOfResources
+  skip (128, 2, 3) split=32: OutOfResources
+  skip (128, 2, 3) split=64: OutOfResources
+B=1   ctx=8192   v1    27.9 us | default    27.4 us | best    15.3 us (2.19 TB/s) split=32 block_n=64 warps=4 stages=1
+  skip (128, 2, 2) split=64: OutOfResources
+  skip (128, 2, 2) split=128: OutOfResources
+  skip (128, 2, 3) split=64: OutOfResources
+  skip (128, 2, 3) split=128: OutOfResources
+B=1   ctx=32768  v1    86.7 us | default    83.8 us | best    37.8 us (3.55 TB/s) split=128 block_n=64 warps=2 stages=1
+  skip (128, 2, 2) split=8: OutOfResources
+  skip (128, 2, 2) split=16: OutOfResources
+  skip (128, 2, 3) split=8: OutOfResources
+  skip (128, 2, 3) split=16: OutOfResources
+B=8   ctx=2048   v1    46.3 us | default    44.9 us | best    21.4 us (3.14 TB/s) split=16 block_n=32 warps=2 stages=1
+  skip (128, 2, 2) split=16: OutOfResources
+  skip (128, 2, 2) split=32: OutOfResources
+  skip (128, 2, 2) split=64: OutOfResources
+  skip (128, 2, 3) split=16: OutOfResources
+  skip (128, 2, 3) split=32: OutOfResources
+  skip (128, 2, 3) split=64: OutOfResources
+B=8   ctx=8192   v1   150.1 us | default   145.8 us | best    64.7 us (4.15 TB/s) split=16 block_n=64 warps=2 stages=1
+  skip (128, 2, 2) split=1: OutOfResources
+  skip (128, 2, 3) split=1: OutOfResources
+B=32  ctx=128    v1    16.5 us | default    13.1 us | best     6.0 us (2.78 TB/s) split=1 block_n=64 warps=4 stages=1
+  skip (128, 2, 2) split=4: OutOfResources
+  skip (128, 2, 2) split=8: OutOfResources
+  skip (128, 2, 2) split=16: OutOfResources
+  skip (128, 2, 3) split=4: OutOfResources
+  skip (128, 2, 3) split=8: OutOfResources
+  skip (128, 2, 3) split=16: OutOfResources
+B=32  ctx=2048   v1   148.4 us | default   145.8 us | best    66.5 us (4.03 TB/s) split=4 block_n=64 warps=2 stages=1
+  skip (128, 2, 2) split=4: OutOfResources
+  skip (128, 2, 2) split=8: OutOfResources
+  skip (128, 2, 2) split=16: OutOfResources
+  skip (128, 2, 3) split=4: OutOfResources
+  skip (128, 2, 3) split=8: OutOfResources
+  skip (128, 2, 3) split=16: OutOfResources
+B=32  ctx=8192   v1   607.4 us | default   601.8 us | best   326.6 us (3.29 TB/s) split=8 block_n=32 warps=2 stages=1
+overall: block_n=64 warps=2 stages=1  geomean time/best = 1.037
+overall: block_n=32 warps=2 stages=1  geomean time/best = 1.058
+overall: block_n=64 warps=4 stages=1  geomean time/best = 1.065
+overall: block_n=32 warps=4 stages=1  geomean time/best = 1.082
+overall: block_n=16 warps=2 stages=1  geomean time/best = 1.129
+== 02:34:36 DONE

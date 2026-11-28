@@ -15,13 +15,19 @@ class KVCache:
         block_size: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        reserve_scratch_block: bool = False,
     ):
+        """``reserve_scratch_block``: keep block 0 out of the allocator. Padding
+        rows of a bucketed decode graph (and graph warm-up/capture) write their
+        K/V to slot 0, which must not belong to a live sequence."""
         self.block_size = block_size
         self.num_blocks = num_blocks
         shape = (cfg.num_layers, num_blocks, block_size, cfg.num_kv_heads, cfg.head_dim)
         self.k = torch.zeros(shape, dtype=dtype, device=device)
         self.v = torch.zeros(shape, dtype=dtype, device=device)
-        self._free = list(range(num_blocks - 1, -1, -1))
+        first = 1 if reserve_scratch_block else 0
+        self.num_usable_blocks = num_blocks - first
+        self._free = list(range(num_blocks - 1, first - 1, -1))
 
     @staticmethod
     def bytes_per_token(cfg: LlamaConfig, dtype: torch.dtype) -> int:

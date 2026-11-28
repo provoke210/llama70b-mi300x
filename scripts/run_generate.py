@@ -25,7 +25,8 @@ from mi300_llm.engine import generate  # noqa: E402
 from mi300_llm.fp8 import compute_fp8_dtype  # noqa: E402
 from mi300_llm.tp import init_from_env  # noqa: E402
 
-PROMPT = "Explain in three sentences why LLM decoding is memory-bandwidth bound."
+from prompts import prompt_ids  # noqa: E402  (scripts/ is on sys.path when run as a script)
+
 SHORT = 16  # tokens in the short timing run; keep in sync with bench_vllm.py
 
 
@@ -40,6 +41,7 @@ def main():
     ap.add_argument("--graph", action="store_true", help="replay decode steps from a captured HIP graph")
     ap.add_argument("--save-tokens", help="write batch-0 prompt and output token ids as JSON")
     ap.add_argument("--compare-tokens", help="JSON from bench_vllm.py: report the first diverging token")
+    ap.add_argument("--prompt-len", type=int, help="pad the prompt with filler tokens to this length (long-context decode)")
     args = ap.parse_args()
     tp = init_from_env()
     import builtins
@@ -49,10 +51,7 @@ def main():
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    # Render to text, then encode: the return type of apply_chat_template with
-    # tokenize=True changed across transformers versions.
-    text = tok.apply_chat_template([{"role": "user", "content": PROMPT}], add_generation_prompt=True, tokenize=False)
-    ids = tok.encode(text, add_special_tokens=False)
+    ids = prompt_ids(tok, args.prompt_len)
 
     t0 = time.time()
     model = load_pretrained(args.model, device="cuda", fp8_dtype=compute_fp8_dtype(), tp=tp)
@@ -88,7 +87,7 @@ def main():
         t_short = min(run(short)[0] for _ in range(3))
         t_long, out = min((run(long) for _ in range(3)), key=lambda r: r[0])
         step = (t_long - t_short) / args.new_tokens
-        print(f"TP={tp.world} batch={bs}: {step * 1e3:.2f} ms/step decode, {bs / step:.0f} tok/s")
+        print(f"TP={tp.world} ctx={len(ids)} batch={bs}: {step * 1e3:.2f} ms/step decode, {bs / step:.0f} tok/s")
     print("---\n" + tok.decode(out[0]))
     if args.save_tokens and tp.rank == 0:
         import json

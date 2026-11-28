@@ -1,0 +1,6 @@
+  decode_attn                  6.7 us    2.5%
+== batch=1, ctx=128, fused quant: 262 us/layer -> 21.0 ms/step (x80)
+  decode_attn                  6.8 us    2.6%
+  decode_attn                 10.1 us    3.2%
+== batch=32, ctx=128, fused quant: 313 us/layer -> 25.1 ms/step (x80)
+  decode_attn                 10.1 us    3.2%

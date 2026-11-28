@@ -12,7 +12,7 @@ from . import ref_ops
 
 _OPS = (
     "fused_add_rmsnorm", "rmsnorm", "apply_rope", "fp8_linear", "fp8_gemm", "paged_decode_attention",
-    "silu_mul", "rmsnorm_quant", "fused_add_rmsnorm_quant", "silu_mul_quant",
+    "silu_mul", "rmsnorm_quant", "fused_add_rmsnorm_quant", "silu_mul_quant", "prefill_attention",
 )
 _backend = "ref"
 _overrides: dict[str, str] = {}
@@ -91,5 +91,6 @@ def silu_mul_quant(*a, **k):
     return _get("silu_mul_quant")(*a, **k)
 
 
-# Prefill attention stays on the reference path for now; decode is the focus.
-prefill_attention = ref_ops.prefill_attention
+def prefill_attention(*a, **k):
+    # "triton" backend: PyTorch SDPA (fused, linear memory), see kernels/prefill_attention.py.
+    return _get("prefill_attention")(*a, **k)

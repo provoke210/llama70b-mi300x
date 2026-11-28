@@ -6,24 +6,38 @@ and against vLLM-ROCm on the same workload.
 
 ## Results at a glance
 
-Decode ms/step on 1x MI300X (lower is better), same prompt, greedy, all three
-run back to back. Details and method: [Results](#results-1x-mi300x-vf-rocm-102-pytorch-215-triton-39).
+Decode ms/step on 1x MI300X (lower is better) for Llama-3.3-70B FP8, same
+prompt tokens, greedy, both engines run back to back in one session. Context =
+KV length decode reads. Details: [Decode attention](#decode-attention) and
+[Results](#results-1x-mi300x-vf-rocm-102-pytorch-215-triton-39).
 
-| batch | this repo | vLLM 0.32 default | vLLM 0.32 + AITER |
+| context | batch | this repo | vLLM 0.32 + AITER |
 |---|---|---|---|
-| 1 | **26.2 ms** (38 tok/s) | 28.8 ms | 27.3 ms |
-| 8 | **27.4 ms** (292 tok/s) | 29.5 ms | 28.0 ms |
-| 32 | 30.5 ms (1048 tok/s) | 31.5 ms | **30.1 ms** |
+| 50 | 1 | **25.3 ms** (40 tok/s) | 26.8 ms |
+| 50 | 8 | **26.3 ms** (305 tok/s) | 27.4 ms |
+| 50 | 32 | **29.4 ms** (1090 tok/s) | 29.7 ms |
+| 2k | 1 | **26.3 ms** | 27.2 ms |
+| 2k | 8 | 28.6 ms | **28.3 ms** |
+| 2k | 32 | 38.1 ms | **35.9 ms** |
+| 8k | 1 | **27.2 ms** | 27.9 ms |
+| 8k | 8 | 34.7 ms | **34.1 ms** |
+| 32k | 1 | **29.5 ms** | 30.8 ms |
 
-- Batch-1 decode went from 25 to 38 tok/s over the project; it now streams the
-  weights at ~77% of the *measured* HBM bandwidth (3.6 TB/s, not the 5.3 TB/s
+- Faster than vLLM + AITER at batch 1 and on short contexts; 1-6% behind when
+  both context and batch are large, where AITER's attention is still ahead.
+- **Serving throughput** with the continuous-batching scheduler: all 1319
+  GSM8K questions at up to 32 concurrent sequences take **330 s (825 tok/s)**
+  vs 291 s (929 tok/s) for vLLM + AITER in the same session, i.e. 13% behind.
+  Static batching took 591 s. See [Continuous batching](#continuous-batching).
+- Batch-1 decode went from 25 to 40 tok/s over the project; it now streams the
+  weights at ~80% of the *measured* HBM bandwidth (3.6 TB/s, not the 5.3 TB/s
   spec).
 - The tuned split-K FP8 GEMMs take 18% less time per layer than hipBLASLt on
   the same shapes.
 - Same accuracy as vLLM: GSM8K (all 1319 test questions, greedy, identical
-  prompts) scores 95.45% vs 95.75% for vLLM and 95.68% for vLLM + AITER; the
-  differences are not significant (paired McNemar p = 0.58 / 0.69). See
-  [Accuracy](#accuracy-gsm8k).
+  prompts) scores 96.13% with the current build vs 95.75% for vLLM and 95.68%
+  for vLLM + AITER; no difference is significant (paired McNemar p = 0.38 /
+  0.31). See [Accuracy](#accuracy-gsm8k).
 - Along the way: three FP8 numerical pitfalls on ROCm / Triton, written up in
   [Findings worth knowing](#findings-worth-knowing).
 
@@ -47,16 +61,19 @@ run back to back. Details and method: [Results](#results-1x-mi300x-vf-rocm-102-p
 |---|---|
 | `mi300_llm/ref_ops.py` | Pure-PyTorch reference for every op; each Triton kernel is tested against it |
 | `mi300_llm/kernels/fp8_gemm.py` | W8A8 FP8 GEMM with deterministic split-K; per-shape configs in `gemm_configs.json` |
-| `mi300_llm/kernels/decode_attention.py` | Split-K (flash-decoding) paged attention, GQA-aware |
+| `mi300_llm/kernels/decode_attention.py` | Split-K (flash-decoding) paged attention, GQA-aware, tuned launch config |
+| `mi300_llm/kernels/decode_attention_v1.py` | The first version, kept for A/B runs (`MI300_ATTN=v1`) |
+| `mi300_llm/kernels/prefill_attention.py` | Causal prefill via PyTorch SDPA (linear memory, for long prompts) |
 | `mi300_llm/kernels/fused_quant.py` | Per-token FP8 quantization, column-parallel, fused with RMSNorm and SiLU-mul |
 | `mi300_llm/kernels/norm_rope.py` | RMSNorm (+ residual add), RoPE, SiLU-mul |
 | `mi300_llm/ops.py` | Switches each op between `ref` and `triton` |
 | `mi300_llm/model.py` | Llama forward over a paged KV cache (fused QKV, fused gate/up) |
 | `mi300_llm/loader.py` | Loads BF16 or compressed-tensors FP8 safetensors, optionally sharded for TP |
 | `mi300_llm/tp.py` | Tensor-parallel layout and communication |
-| `mi300_llm/engine.py` | Batched greedy generation, HIP-graph decode |
+| `mi300_llm/engine.py` | Static batched greedy generation, HIP-graph decode |
+| `mi300_llm/scheduler.py` | Continuous batching: admission, mixed prefill+decode steps, bucketed decode graphs, preemption |
 | `tests/` | Reference vs Hugging Face, kernels vs reference, TP on CPU (gloo) |
-| `scripts/` | Droplet setup, generation + timing, benchmarks, GEMM tuning, vLLM comparison |
+| `scripts/` | Droplet setup, generation + timing (`--prompt-len` for long contexts), benchmarks, GEMM and attention tuning, vLLM comparison, GSM8K |
 | `scripts/investigations/` | One-off scripts behind the numerical findings |
 | `results/` | Raw logs and CSVs; [results/README.md](results/README.md) indexes them |
 | `notebooks/roofline.ipynb` | Plots: kernel bandwidth, attention scaling, end-to-end vs vLLM |
@@ -73,19 +90,23 @@ run back to back. Details and method: [Results](#results-1x-mi300x-vf-rocm-102-p
 | 5. Column-parallel quantization; RMSNorm + quant and SiLU-mul + quant fusion | Done |
 | 6. Tensor parallelism: sharded loading, all-reduce, vocab-parallel head; verified on CPU (gloo, TP=2/4) | Done; **not yet run on GPUs** |
 | 7. GSM8K accuracy vs vLLM on identical prompts | Done: on par |
-| Next: TP scaling on 8x MI300X vs vLLM (`scripts/compare_tp.sh`); faster decode attention; continuous batching | |
+| 8. Decode attention: launch-config sweep, single-split fast path; SDPA prefill; long-context benchmarks | Done |
+| 9. Continuous-batching scheduler, GSM8K throughput vs vLLM | Done: 13% behind vLLM (was 2x) |
+| Next: overlap host-side scheduling with GPU work; graph-captured mixed steps; TP on 8x MI300X (`scripts/compare_tp.sh`; the 8-GPU plan was out of capacity) | |
 
-Tests: 58 pass on the MI300X (kernels, model, early stopping, and the CPU TP
-tests); 12 run on a CPU-only machine.
+Tests: 69 pass on the MI300X (kernels, model, scheduler incl. graph vs eager,
+early stopping, CPU TP tests); 19 run on a CPU-only machine.
 
 ## Limitations
 
 - **Accuracy is checked on one benchmark.** GSM8K matches vLLM; other tasks
-  (long context, code) are not evaluated.
-- **Decode-focused engine.** No continuous batching (requests can't join
-  mid-decode), so a batch runs until its longest answer ends: GSM8K took
-  618 s here vs ~300 s in vLLM at the same per-step speed. Prefill uses the
-  reference attention, not a tuned kernel.
+  (long-context quality, code) are not evaluated. Long contexts are measured
+  for speed only, with filler-text prompts.
+- **Not a serving system.** The scheduler serves a list of requests in
+  process: no HTTP/OpenAI API, streaming, prefix caching or chunked prefill
+  (a long prompt is prefilled in one step). Steps that admit requests run
+  eagerly (no graph). Prefill attention is PyTorch SDPA and the prefill GEMMs
+  are not tuned.
 - **One virtualized GPU.** All numbers are from a single MI300X VF (SR-IOV) on
   AMD Developer Cloud; bare-metal bandwidth may differ.
 - **Tensor parallelism is verified for correctness only**, on CPU. Its GPU
@@ -131,7 +152,8 @@ not the 5.3 TB/s spec, so the realistic batch-1 floor for 72.7 GB of weights is
 
 ### Against vLLM
 
-Llama-3.3-70B-Instruct-FP8-dynamic, same prompt tokens, greedy, EOS ignored.
+From the 11-25 session, before the attention work; the table at the top is the
+latest (11-28). Llama-3.3-70B-Instruct-FP8-dynamic, same prompt tokens, greedy, EOS ignored.
 Decode ms/step = (time for 80 tokens - time for 16 tokens) / 64, best of 3,
 warm, all three run back to back. vLLM is
 `rocm/vllm:rocm10.2.0_ubuntu24.04_py3.14-pytorch_2.14.0_vllm-0.32.0`
@@ -157,6 +179,82 @@ backends agree with each other for 42. Different FP8 accumulation orders flip
 near-ties, then the sequences diverge; all outputs read coherently. Token
 agreement is not an accuracy metric; a task benchmark is the next check.
 
+### Continuous batching
+
+`mi300_llm/scheduler.py`. Each step reserves KV for every running sequence's
+next token (preempting the newest sequence if the cache is full; it is later
+recomputed), admits waiting requests within a prefill-token budget, and runs
+one forward: new prompts (prefill) and one token per running sequence
+(decode) together, so the weights are read once. Pure decode steps replay a
+HIP graph captured for the smallest batch bucket (1, 2, 4, ..., 32) that fits;
+padding rows write to a reserved scratch KV block. Tests check that every
+request's greedy output equals running it alone, including under preemption.
+
+GSM8K, all 1319 questions, up to 32 concurrent sequences, same prompts and
+stop tokens, one session (`results/scheduler.log`):
+
+| | time | throughput | accuracy | steps | admitting steps | mean decode batch |
+|---|---|---|---|---|---|---|
+| static batches of 32 (11-28) | 591 s | 459 tok/s | 96.13% | | | |
+| scheduler, admit when >= 4 slots free | **330 s** | **825 tok/s** | 95.98% | 9136 | 318 | 29.6 |
+| scheduler, admit when >= 1 slot free | 343 s | 791 tok/s | 95.30% | 8626 | 1179 | 31.3 |
+| vLLM 0.32 + AITER | 291 s | 929 tok/s | 95.30% | | | |
+
+- **Admitting eagerly is slower even though it keeps the batch fuller.** An
+  admitting step runs without a graph (~50 ms vs ~29 ms), and admitting one
+  request at a time made 3.7x as many of them. Waiting for 4 free slots
+  (`max_num_seqs // 8`) wins despite a lower mean batch.
+- **Remaining gap to vLLM.** 330 s over 9136 steps is ~36 ms per step, while a
+  graph-replayed batch-32 decode step measured ~29.4 ms at short context. The
+  difference is most likely host-side work per step (Python scheduling,
+  building inputs, a sync to read the sampled tokens) that vLLM overlaps with
+  GPU execution. Not profiled yet; that is the next step.
+- Accuracy differences are not significant (this repo vs vLLM: McNemar
+  p = 0.12; vs static batching: p = 0.77). vLLM itself moved from 95.68% to
+  95.30% between two runs. The two admission policies give p = 0.02, but
+  they differ only in batch composition (floating-point order) and this
+  is one of many comparisons, so it is treated as noise.
+
+### Decode attention
+
+The first kernel reached ~1.7 TB/s on long contexts, half the measured
+bandwidth. `scripts/tune_attention.py` swept block size, warps and pipeline
+stages (36 launch configs x 3 split counts, each checked against the
+reference) over 8 (batch, context) points, timing GPU work from graph replay.
+Full output: `results/attention_tune.txt`.
+
+| batch | context | v1 kernel | new kernel, Triton defaults | new kernel, best launch |
+|---|---|---|---|---|
+| 1 | 32k | 86.7 us | 83.8 us | **37.8 us** |
+| 8 | 8k | 150.1 us | 145.8 us | **64.7 us** |
+| 32 | 2k | 148.4 us | 145.8 us | **66.5 us** |
+| 32 | 8k | 607.4 us | 601.8 us | **326.6 us** |
+| 32 | 128 | 16.5 us | 13.1 us | **6.0 us** |
+
+- **The 2x came from launch parameters, not code.** At the same launch config
+  the rewritten kernel (exp2 softmax, no merge kernel when there is one split)
+  is within ~3% of v1, except at short contexts where skipping the merge saves a
+  launch. `num_stages=1` (no software pipelining of the block-table-indexed K/V
+  loads), 2 warps and 64-token tiles did the rest; one such config is within
+  3.7% (geomean) of every point's own best and is now the default.
+- Two points show ~4 TB/s, above the 3.6 TB/s streaming bandwidth: their KV is
+  ~268 MB, close to the 256 MB Infinity Cache, so repeated replay partly hits
+  cache. The end-to-end numbers below are the ones to trust.
+
+End to end, one session, only the attention kernel switched (`MI300_ATTN=v1`),
+ms/step (`results/attention_compare.log`):
+
+| context | batch | v1 | new | change |
+|---|---|---|---|---|
+| 50 | 32 | 30.21 | 29.35 | -2.8% |
+| 2k | 8 | 30.17 | 28.60 | -5.2% |
+| 2k | 32 | 43.83 | 38.05 | -13.2% |
+| 8k | 8 | 40.88 | 34.71 | -15.1% |
+| 32k | 1 | 32.48 | 29.51 | -9.1% |
+
+Absolute numbers move by ~0.4 ms between droplet sessions (v1 at batch 1 was
+26.2 ms on 11-25 and 25.8 ms on 11-28), so compare within a session only.
+
 ### Accuracy (GSM8K)
 
 All 1319 GSM8K test questions, zero-shot chain of thought, greedy, up to 512
@@ -171,7 +269,14 @@ same prompt token ids; the answer is the number after the last `####`.
 | vLLM 0.32 default | 1263 / 1319 | 95.75% | 94.53 - 96.72% |
 | vLLM 0.32 + AITER | 1262 / 1319 | 95.68% | 94.44 - 96.65% |
 
-Paired by question: this repo and vLLM disagree on 30 questions (13 only this
+After the attention and prefill changes the run was repeated
+(`results/gsm8k_ours_attn_v2.jsonl`): **1268 / 1319 = 96.13%**
+(95% CI 94.95 - 97.05%). Against the previous build it differs on 23
+questions (16 vs 7, McNemar p = 0.09), against vLLM on 21 (p = 0.38) and
+against vLLM + AITER on 24 (p = 0.31): no significant change, so no claim
+of an accuracy gain.
+
+For the first build: this repo and vLLM disagree on 30 questions (13 only this
 repo gets right, 17 only vLLM; exact McNemar p = 0.58). vLLM's own two
 backends disagree on 23 (12 vs 11, p = 1.00). So FP8 kernel differences flip a
 handful of answers in both directions, no more than switching vLLM's backend
@@ -186,7 +291,7 @@ than in real decode, where 70 GB of weights stream through.
 
 | | before | column-parallel quant | + fusion |
 |---|---|---|---|
-| us / layer | 294 | 280 | **274** |
+| us / layer | 294 | 280 | **274** (262 with the tuned attention, 11-28) |
 | down-proj input quant | 13.9 us (one program per row: one CU at batch 1) | 3.5 us | fused into SiLU-mul |
 
 ### Optimization steps

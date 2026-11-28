@@ -52,17 +52,26 @@ class Layer:
 
 @dataclass
 class AttnMeta:
-    """Describes one forward batch.
+    """Describes one forward batch: a prefill part, then a decode part.
 
-    Prefill batches carry ``cu_seqlens`` (every sequence starts from an empty
-    cache). Decode batches carry one token per sequence plus block tables.
+    The first ``cu_seqlens[-1]`` tokens are prefill tokens of whole sequences
+    that start from an empty cache (``cu_seqlens`` delimits them). Every
+    remaining token is one decode token of a running sequence, attending over
+    its paged cache through ``block_tables`` / ``seq_lens``. Either part may be
+    empty: ``is_prefill=True`` is a pure prefill batch, ``cu_seqlens=None`` a
+    pure decode batch, and a scheduler step that admits new requests while
+    others decode uses both (one forward, one read of the weights).
     """
 
     is_prefill: bool
     slot_mapping: torch.Tensor  # [T] int64: flat cache slot of every token
     cu_seqlens: list[int] | None = None
-    block_tables: torch.Tensor | None = None  # [B, max_blocks] int32
-    seq_lens: torch.Tensor | None = None  # [B] int32, including the new token
+    block_tables: torch.Tensor | None = None  # [B_decode, max_blocks] int32
+    seq_lens: torch.Tensor | None = None  # [B_decode] int32, including the new token
+
+    @property
+    def num_prefill_tokens(self) -> int:
+        return self.cu_seqlens[-1] if self.cu_seqlens else 0
 
 
 class LlamaModel:
@@ -90,7 +99,8 @@ class LlamaModel:
 
     @torch.inference_mode()
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, meta: AttnMeta, cache: KVCache) -> torch.Tensor:
-        """Returns logits [num_seqs, vocab] for the last token of each sequence."""
+        """Returns logits [num_seqs, vocab]: prefill sequences first, then decode
+        sequences, one row each (its last token)."""
         cfg = self.cfg
         eps = cfg.rms_norm_eps
         act = self.dtype
@@ -122,15 +132,17 @@ class LlamaModel:
             k_cache.view(-1, cfg.num_kv_heads, cfg.head_dim)[meta.slot_mapping] = k
             v_cache.view(-1, cfg.num_kv_heads, cfg.head_dim)[meta.slot_mapping] = v
 
-            if meta.is_prefill:
-                outs = []
+            n_pre = meta.num_prefill_tokens
+            outs = []
+            if n_pre:
                 cu = meta.cu_seqlens
                 for s in range(len(cu) - 1):
                     a, b = cu[s], cu[s + 1]
                     outs.append(ops.prefill_attention(q[a:b], k[a:b], v[a:b], self.scale))
-                attn = torch.cat(outs, dim=0)
-            else:
-                attn = ops.paged_decode_attention(q, k_cache, v_cache, meta.block_tables, meta.seq_lens, self.scale)
+            if q.shape[0] > n_pre:
+                outs.append(ops.paged_decode_attention(q[n_pre:].contiguous() if n_pre else q, k_cache, v_cache,
+                                                       meta.block_tables, meta.seq_lens, self.scale))
+            attn = outs[0] if len(outs) == 1 else torch.cat(outs, dim=0)
 
             h = self.tp.all_reduce(layer.o(attn.reshape(-1, cfg.q_size)))  # row-parallel partial sums
             if fp8:
@@ -144,8 +156,11 @@ class LlamaModel:
             h = self.tp.all_reduce(h)
 
         h, _ = ops.fused_add_rmsnorm(h, residual, self.norm, eps)
-        if meta.is_prefill:
-            last = torch.tensor(meta.cu_seqlens[1:], device=h.device) - 1
-            h = h[last]
+        n_pre = meta.num_prefill_tokens
+        if n_pre:
+            # One row per sequence: the last prefill token of each prefill
+            # sequence, then every decode token.
+            idx = [c - 1 for c in meta.cu_seqlens[1:]] + list(range(n_pre, h.shape[0]))
+            h = h[torch.tensor(idx, device=h.device)]
         # Vocab-parallel head: local logits, then every rank gets the full row.
         return self.tp.all_gather_last_dim((h @ self.lm_head.t()).float())

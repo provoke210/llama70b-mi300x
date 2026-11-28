@@ -92,9 +92,21 @@ def test_paged_decode_attention(lens, hq, hkv, d):
     q = torch.randn(B, hq, d, device=DEV, dtype=DT)
     scale = d**-0.5
     ref = ref_ops.paged_decode_attention(q, k_cache, v_cache, tables, seq_lens, scale)
-    for splits in (1, 3, None):
+    for splits in (1, 3, None):  # 1 takes the single-split path (no merge kernel)
         ours = kernels.paged_decode_attention(q, k_cache, v_cache, tables, seq_lens, scale, num_splits=splits)
         _close(ours, ref)
+    # Every launch-parameter combination the tuning sweep may pick.
+    for block_n, warps, stages in ((16, 2, 1), (64, 4, 2), (128, 8, 1), (64, 8, 3)):
+        ours = kernels.paged_decode_attention(q, k_cache, v_cache, tables, seq_lens, scale, num_splits=4,
+                                              block_n=block_n, num_warps=warps, num_stages=stages)
+        _close(ours, ref)
+
+
+@pytest.mark.parametrize("t,hq,hkv", [(1, 64, 8), (300, 64, 8), (1000, 32, 8)])
+def test_prefill_attention_sdpa(t, hq, hkv):
+    q = torch.randn(t, hq, 128, device=DEV, dtype=DT)
+    k, v = torch.randn(t, hkv, 128, device=DEV, dtype=DT), torch.randn(t, hkv, 128, device=DEV, dtype=DT)
+    _close(kernels.prefill_attention(q, k, v, 128**-0.5), ref_ops.prefill_attention(q, k, v, 128**-0.5))
 
 
 def test_tiny_model_triton_matches_ref(hf_tiny, tiny_cfg):
@@ -109,7 +121,11 @@ def test_tiny_model_triton_matches_ref(hf_tiny, tiny_cfg):
     results = {}
     for backend in ("ref", "triton"):
         ops.set_backend(backend)
-        results[backend] = generate(model, cache, prompts, max_new_tokens=6, return_logits=True)
+        # Prefill on the reference path for both: SDPA's bf16 flash attention
+        # flips first tokens of this tiny, weight-inflated model (it has its
+        # own test, test_prefill_attention_sdpa); this test is about decode.
+        with ops.override(prefill_attention="ref"):
+            results[backend] = generate(model, cache, prompts, max_new_tokens=6, return_logits=True)
     ops.set_backend("ref")
     (ref_tok, ref_logits), (tri_tok, tri_logits) = results["ref"], results["triton"]
     # bf16 accumulation order can flip a near-tie; once a sequence's tokens
@@ -196,6 +212,35 @@ def test_graph_decode_matches_eager(hf_tiny, tiny_cfg):
     for a, b in zip(g_logits, e_logits):
         torch.testing.assert_close(a, b, rtol=2e-2, atol=2e-2)
     assert cache.num_free_blocks == cache.num_blocks
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="graphs need a GPU")
+def test_scheduler_graph_matches_eager(hf_tiny, tiny_cfg):
+    """Continuous batching with bucketed graph replay gives exactly the tokens
+    of the same schedule run eagerly with the same padding (same row counts,
+    so the same GEMM configs and kernels)."""
+    import random
+
+    from mi300_llm import KVCache, from_state_dict, ops
+    from mi300_llm.scheduler import ContinuousBatchingEngine, Request
+
+    random.seed(0)
+    prompts = [[random.randrange(1, 300) for _ in range(n)] for n in (3, 17, 9, 40, 5, 26, 12, 33, 7, 21)]
+    model = from_state_dict(tiny_cfg, hf_tiny.state_dict(), dtype=DT, device=DEV, fp8_dtype=compute_fp8_dtype(), quantize=True)
+    ops.set_backend("triton")
+    try:
+        outs = {}
+        for graph in (False, True):
+            cache = KVCache(tiny_cfg, num_blocks=64, block_size=16, dtype=DT, device=DEV, reserve_scratch_block=True)
+            eng = ContinuousBatchingEngine(model, cache, max_num_seqs=4, max_model_len=128, admit_min=1,
+                                           use_graph=graph, pad_decode=True)
+            reqs = eng.run([Request(i, p, 10) for i, p in enumerate(prompts)])
+            outs[graph] = [r.output for r in reqs]
+            assert (eng.stats.graph_steps > 0) == graph
+            assert cache.num_free_blocks == cache.num_usable_blocks
+    finally:
+        ops.set_backend("ref")
+    assert outs[True] == outs[False]
 
 
 def test_quant_codes_are_correctly_rounded():

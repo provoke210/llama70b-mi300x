@@ -56,6 +56,25 @@ def test_stop_ids_truncate_and_stop_early(hf_tiny, tiny_cfg):
     assert cache.num_free_blocks == cache.num_blocks
 
 
+def test_sdpa_prefill_matches_reference():
+    """The SDPA prefill (pure torch, so testable on CPU) equals the reference,
+    including GQA head grouping and the causal mask."""
+    import importlib.util
+    from pathlib import Path
+
+    from mi300_llm.ref_ops import prefill_attention as ref
+
+    # Load the module file directly: importing the kernels package needs Triton.
+    path = Path(__file__).resolve().parents[1] / "mi300_llm/kernels/prefill_attention.py"
+    spec = importlib.util.spec_from_file_location("sdpa_prefill", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    torch.manual_seed(0)
+    for t, hq, hkv in ((1, 8, 8), (37, 8, 2), (130, 64, 8)):
+        q, k, v = torch.randn(t, hq, 16), torch.randn(t, hkv, 16), torch.randn(t, hkv, 16)
+        torch.testing.assert_close(mod.prefill_attention(q, k, v, 0.25), ref(q, k, v, 0.25), rtol=1e-5, atol=1e-5)
+
+
 def test_fnuz_conversion_is_lossless():
     torch.manual_seed(0)
     w = torch.randn(64, 32) * 3
